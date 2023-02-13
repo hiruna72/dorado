@@ -1,12 +1,18 @@
 #include "DataLoader.h"
 
 #include "../read_pipeline/ReadPipeline.h"
+#include "../utils/compat_utils.h"
+#include "cxxpool.h"
+#ifdef USE_POD5
 #include "pod5_format/c_api.h"
-#include "utils/compat_utils.h"
+#endif
+#ifdef USE_FAST5
 #include "vbz_plugin_user_utils.h"
-
 #include <highfive/H5Easy.hpp>
 #include <highfive/H5File.hpp>
+#endif
+
+#include <spdlog/spdlog.h>
 
 #include <cctype>
 #include <ctime>
@@ -17,6 +23,7 @@
 #include "slow5_thread.h"
 
 namespace {
+#ifdef USE_FAST5
 void string_reader(HighFive::Attribute& attribute, std::string& target_str) {
     // Load as a variable string if possible
     if (attribute.getDataType().isVariableStr()) {
@@ -44,6 +51,23 @@ void string_reader(HighFive::Attribute& attribute, std::string& target_str) {
         target_str.resize(eol_pos);
     }
 };
+#endif
+
+std::string get_string_timestamp_from_unix_time(time_t time_stamp_ms) {
+    static std::mutex timestamp_mtx;
+    std::unique_lock lock(timestamp_mtx);
+    //Convert a time_t (seconds from UNIX epoch) to a timestamp in %Y-%m-%dT%H:%M:%SZ format
+    auto time_stamp_s = time_stamp_ms / 1000;
+    int num_ms = time_stamp_ms % 1000;
+    char buf[32];
+    struct tm ts;
+    ts = *gmtime(&time_stamp_s);
+    strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S.", &ts);
+    std::string time_stamp_str = std::string(buf);
+    time_stamp_str += std::to_string(num_ms);  // add ms
+    time_stamp_str += "+00:00";                //add zero timezone
+    return time_stamp_str;
+}
 
 std::string adjust_time(const std::string& time_stamp, uint32_t offset) {
     // Expects the time to be encoded like "2017-09-12T9:50:12Z".
@@ -57,175 +81,168 @@ std::string adjust_time(const std::string& time_stamp, uint32_t offset) {
     strftime(buff, 32, "%FT%TZ", new_time);
     return std::string(buff);
 }
+
+#ifdef USE_POD5
+std::shared_ptr<dorado::Read> process_pod5_read(size_t row,
+                                                Pod5ReadRecordBatch* batch,
+                                                Pod5FileReader* file,
+                                                const std::string path,
+                                                std::string device) {
+    uint16_t read_table_version = 0;
+    ReadBatchRowInfo_t read_data;
+    if (pod5_get_read_batch_row_info_data(batch, row, READ_BATCH_ROW_INFO_VERSION, &read_data,
+                                          &read_table_version) != POD5_OK) {
+        spdlog::error("Failed to get read {}", row);
+    }
+
+    //Retrieve global information for the run
+    RunInfoDictData_t* run_info_data;
+    if (pod5_get_run_info(batch, read_data.run_info, &run_info_data) != POD5_OK) {
+        spdlog::error("Failed to get Run Info {}{}", row, pod5_get_error_string());
+    }
+    auto run_acquisition_start_time_ms = run_info_data->acquisition_start_time_ms;
+    auto run_sample_rate = run_info_data->sample_rate;
+
+    char read_id_tmp[37];
+    pod5_error_t err = pod5_format_read_id(read_data.read_id, read_id_tmp);
+    std::string read_id_str(read_id_tmp);
+
+    auto options = torch::TensorOptions().dtype(torch::kInt16);
+    auto samples = torch::empty(read_data.num_samples, options);
+
+    if (pod5_get_read_complete_signal(file, batch, row, read_data.num_samples,
+                                      samples.data_ptr<int16_t>()) != POD5_OK) {
+        spdlog::error("Failed to get read {} signal: {}", row, pod5_get_error_string());
+    }
+
+    auto new_read = std::make_shared<dorado::Read>();
+    new_read->raw_data = samples;
+    new_read->sample_rate = run_sample_rate;
+    auto start_time_ms =
+            run_acquisition_start_time_ms + ((read_data.start_sample * 1000) / run_sample_rate);
+    auto start_time = get_string_timestamp_from_unix_time(start_time_ms);
+    new_read->scaling = read_data.calibration_scale;
+    new_read->offset = read_data.calibration_offset;
+    new_read->read_id = std::move(read_id_str);
+    new_read->num_trimmed_samples = 0;
+    new_read->attributes.read_number = read_data.read_number;
+    new_read->attributes.fast5_filename = std::filesystem::path(path.c_str()).filename().string();
+    new_read->attributes.mux = read_data.well;
+    new_read->attributes.channel_number = read_data.channel;
+    new_read->attributes.start_time = start_time;
+
+    return new_read;
+}
+#endif
+
 } /* anonymous namespace */
+
+namespace dorado {
 
 void DataLoader::load_reads(const std::string& path) {
     if (!std::filesystem::exists(path)) {
-        std::cerr << "Requested input path " << path << " does not exist!" << std::endl;
+        spdlog::error("Requested input path {} does not exist!", path);
         m_read_sink.terminate();
         return;
     }
     if(!std::filesystem::is_directory(path)) {
         std::string ext = std::filesystem::path(path).extension().string();
         std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c){ return std::tolower(c); });
+#ifdef USE_FAST5
         if(ext == ".fast5") {
             load_fast5_reads_from_file(path);
         }
-        else if(ext == ".pod5") {
+#endif
+#ifdef USE_POD5
+        if(ext == ".pod5") {
             load_pod5_reads_from_file(path);
         }
-        else if(ext == ".slow5" || ext == ".blow5") {
+#endif
+        if(ext == ".slow5" || ext == ".blow5") {
             load_slow5_reads_from_file(path);
         }
     }else{
         for (const auto & entry : std::filesystem::directory_iterator(path)) {
             std::string ext = std::filesystem::path(entry).extension().string();
             std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c){ return std::tolower(c); });
+#ifdef USE_FAST5
             if(ext == ".fast5") {
                 load_fast5_reads_from_file(entry.path().string());
             }
-            else if(ext == ".pod5") {
+#endif
+#ifdef USE_POD5
+            if(ext == ".pod5") {
                 load_pod5_reads_from_file(entry.path().string());
             }
-            else if(ext == ".slow5" || ext == ".blow5") {
+#endif
+            if(ext == ".slow5" || ext == ".blow5") {
                 load_slow5_reads_from_file(entry.path().string());
             }
         }
     }
     m_read_sink.terminate();
-    std::cerr << "> Loaded " << m_loaded_read_count << " reads" << std::endl;
 }
 
+#ifdef USE_POD5
 void DataLoader::load_pod5_reads_from_file(const std::string& path) {
     pod5_init();
 
     // Open the file ready for walking:
-    Pod5FileReader_t* file = pod5_open_combined_file(path.c_str());
+    Pod5FileReader_t* file = pod5_open_file(path.c_str());
 
     if (!file) {
-        std::cerr << "Failed to open file " << path.c_str() << ": " << pod5_get_error_string()
-                  << "\n";
+        spdlog::error("Failed to open file {}: {}", path, pod5_get_error_string());
     }
 
     std::size_t batch_count = 0;
     if (pod5_get_read_batch_count(&batch_count, file) != POD5_OK) {
-        std::cerr << "Failed to query batch count: " << pod5_get_error_string() << "\n";
+        spdlog::error("Failed to query batch count: {}", pod5_get_error_string());
     }
 
-    size_t read_count = 0;
-    std::size_t samples_read = 0;
+    cxxpool::thread_pool pool{m_num_worker_threads};
 
     for (std::size_t batch_index = 0; batch_index < batch_count; ++batch_index) {
+        if (m_loaded_read_count == m_max_reads) {
+            break;
+        }
         Pod5ReadRecordBatch_t* batch = nullptr;
         if (pod5_get_read_batch(&batch, file, batch_index) != POD5_OK) {
-            std::cerr << "Failed to get batch: " << pod5_get_error_string() << "\n";
+            spdlog::error("Failed to get batch: {}", pod5_get_error_string());
         }
 
         std::size_t batch_row_count = 0;
         if (pod5_get_read_batch_row_count(&batch_row_count, batch) != POD5_OK) {
-            std::cerr << "Failed to get batch row count\n";
+            spdlog::error("Failed to get batch row count");
         }
+        batch_row_count = std::min(batch_row_count, m_max_reads - m_loaded_read_count);
+
+        std::vector<std::future<std::shared_ptr<Read>>> futures;
 
         for (std::size_t row = 0; row < batch_row_count; ++row) {
-            uint8_t read_id[16];
-            int16_t pore = 0;
-            int16_t calibration_idx = 0;
-            uint32_t read_number = 0;
-            uint64_t start_sample = 0;
-            float median_before = 0.0f;
-            int16_t end_reason = 0;
-            int16_t run_info = 0;
-            int64_t signal_row_count = 0;
-            if (pod5_get_read_batch_row_info(
-                        batch, row, read_id, &pore, &calibration_idx, &read_number, &start_sample,
-                        &median_before, &end_reason, &run_info, &signal_row_count) != POD5_OK) {
-                std::cerr << "Failed to get read " << row << "\n";
-            }
-            read_count += 1;
+            futures.push_back(pool.push(process_pod5_read, row, batch, file, path, m_device));
+        }
 
-            char read_id_tmp[37];
-            pod5_error_t err = pod5_format_read_id(read_id, read_id_tmp);
-            std::string read_id_str(read_id_tmp);
-
-            // Now read out the calibration params:
-            CalibrationDictData_t* calib_data = nullptr;
-            if (pod5_get_calibration(batch, calibration_idx, &calib_data) != POD5_OK) {
-                std::cerr << "Failed to get read " << row
-                          << " calibration_idx data: " << pod5_get_error_string() << "\n";
-            }
-
-            // Find the absolute indices of the signal rows in the signal table
-            std::vector<std::uint64_t> signal_rows_indices(signal_row_count);
-            if (pod5_get_signal_row_indices(batch, row, signal_row_count,
-                                            signal_rows_indices.data()) != POD5_OK) {
-                std::cerr << "Failed to get read " << row
-                          << " signal row indices: " << pod5_get_error_string() << "\n";
-            }
-
-            // Find the locations of each row in signal batches:
-            std::vector<SignalRowInfo_t*> signal_rows(signal_row_count);
-            if (pod5_get_signal_row_info(file, signal_row_count, signal_rows_indices.data(),
-                                         signal_rows.data()) != POD5_OK) {
-                std::cerr << "Failed to get read " << row
-                          << " signal row locations: " << pod5_get_error_string() << "\n";
-            }
-
-            std::size_t total_sample_count = 0;
-            for (std::size_t i = 0; i < signal_row_count; ++i) {
-                total_sample_count += signal_rows[i]->stored_sample_count;
-            }
-
-            std::vector<std::int16_t> samples(total_sample_count);
-            std::size_t samples_read_so_far = 0;
-            for (std::size_t i = 0; i < signal_row_count; ++i) {
-                if (pod5_get_signal(file, signal_rows[i], signal_rows[i]->stored_sample_count,
-                                    samples.data() + samples_read_so_far) != POD5_OK) {
-                    std::cerr << "Failed to get read " << row
-                              << " signal: " << pod5_get_error_string() << "\n";
-                }
-
-                samples_read_so_far += signal_rows[i]->stored_sample_count;
-            }
-
-            std::vector<float> floatTmp(samples.begin(), samples.end());
-
-            samples_read += samples.size();
-
-            auto new_read = std::make_shared<Read>();
-
-            auto options = torch::TensorOptions().dtype(torch::kFloat32);
-            new_read->raw_data = torch::from_blob(floatTmp.data(), floatTmp.size(), options)
-                                         .clone()
-                                         .to(m_device);
-            float scale = calib_data->scale;
-            float offset = calib_data->offset;
-
-            new_read->scale = calib_data->scale;
-            new_read->scale_set = true;
-            new_read->offset = calib_data->offset;
-            new_read->read_id = read_id_str;
-
-            m_read_sink.push_read(new_read);
+        for (auto& v : futures) {
+            auto read = v.get();
+            m_read_sink.push_read(read);
             m_loaded_read_count++;
-
-            pod5_release_calibration(calib_data);
-            pod5_free_signal_row_info(signal_row_count, signal_rows.data());
         }
 
         if (pod5_free_read_batch(batch) != POD5_OK) {
-            std::cerr << "Failed to release batch\n";
+            spdlog::error("Failed to release batch");
         }
     }
     pod5_close_and_free_reader(file);
 }
-
+#endif
+#ifdef USE_FAST5
 void DataLoader::load_fast5_reads_from_file(const std::string& path) {
     // Read the file into a vector of torch tensors
     H5Easy::File file(path, H5Easy::File::ReadOnly);
     HighFive::Group reads = file.getGroup("/");
     int num_reads = reads.getNumberObjects();
 
-    for (int i = 0; i < num_reads; i++) {
+    for (int i = 0; i < num_reads && m_loaded_read_count < m_max_reads; i++) {
         auto read_id = reads.getObjectName(i);
         HighFive::Group read = reads.getGroup(read_id);
 
@@ -261,9 +278,10 @@ void DataLoader::load_fast5_reads_from_file(const std::string& path) {
         if (ds.getDataType().string() != "Integer16")
             throw std::runtime_error("Invalid FAST5 Signal data type of " +
                                      ds.getDataType().string());
-        std::vector<int16_t> tmp;
-        ds.read(tmp);
-        std::vector<float> floatTmp(tmp.begin(), tmp.end());
+
+        auto options = torch::TensorOptions().dtype(torch::kInt16);
+        auto samples = torch::empty(ds.getElementCount(), options);
+        ds.read(samples.data_ptr<int16_t>());
 
         HighFive::Attribute mux_attr = raw.getAttribute("start_mux");
         HighFive::Attribute read_number_attr = raw.getAttribute("read_number");
@@ -287,16 +305,15 @@ void DataLoader::load_fast5_reads_from_file(const std::string& path) {
         auto start_time_str =
                 adjust_time(exp_start_time, static_cast<uint32_t>(start_time / sampling_rate));
 
-        auto options = torch::TensorOptions().dtype(torch::kFloat32);
         auto new_read = std::make_shared<Read>();
-        new_read->raw_data =
-                torch::from_blob(floatTmp.data(), floatTmp.size(), options).clone().to(m_device);
+        new_read->sample_rate = sampling_rate;
+        new_read->raw_data = samples;
         new_read->digitisation = digitisation;
         new_read->range = range;
         new_read->offset = offset;
+        new_read->scaling = range / digitisation;
         new_read->read_id = read_id;
-        new_read->num_samples = floatTmp.size();
-        new_read->num_trimmed_samples = floatTmp.size();  // same value until we actually trim
+        new_read->num_trimmed_samples = 0;
         new_read->attributes.mux = mux;
         new_read->attributes.read_number = read_number;
         new_read->attributes.channel_number = channel_number;
@@ -307,6 +324,7 @@ void DataLoader::load_fast5_reads_from_file(const std::string& path) {
         m_loaded_read_count++;
     }
 }
+#endif
 
 void create_read_data(core_t *core, db_t *db, int32_t i) {
     //
@@ -316,11 +334,11 @@ void create_read_data(core_t *core, db_t *db, int32_t i) {
     } else {
         free(db->mem_records[i]);
     }
-    auto new_read = std::make_shared<Read>();
+    auto new_read = std::make_shared<dorado::Read>();
 
     //
     std::vector<int16_t> tmp(rec->raw_signal,rec->raw_signal+rec->len_raw_signal);
-    std::vector<float> floatTmp(tmp.begin(), tmp.end());
+//    std::vector<float> floatTmp(tmp.begin(), tmp.end());
 
     int ret = 0;
     uint64_t start_time = slow5_aux_get_uint64(rec, "start_time", &ret);
@@ -351,14 +369,16 @@ void create_read_data(core_t *core, db_t *db, int32_t i) {
 
     auto start_time_str = adjust_time(exp_start_time, static_cast<uint32_t>(start_time / rec->sampling_rate));
 
-    auto options = torch::TensorOptions().dtype(torch::kFloat32);
-    new_read->raw_data = torch::from_blob(floatTmp.data(), floatTmp.size(), options).clone().to(core->m_device_);
+//    auto options = torch::TensorOptions().dtype(torch::kFloat32);
+    auto options = torch::TensorOptions().dtype(torch::kInt16);
+    new_read->sample_rate = rec->sampling_rate;
+    new_read->raw_data = torch::from_blob(tmp.data(), tmp.size(), options).clone().to(core->m_device_);
     new_read->digitisation = rec->digitisation;
     new_read->range = rec->range;
+    new_read->scaling = rec->range / rec->digitisation;
     new_read->offset = rec->offset;
     new_read->read_id = rec->read_id;
-    new_read->num_samples = floatTmp.size();
-    new_read->num_trimmed_samples = floatTmp.size(); // same value until we actually trim
+    new_read->num_trimmed_samples = 0;
     new_read->attributes.mux = mux;
     new_read->attributes.read_number = read_number;
     new_read->attributes.channel_number = channel_number;
@@ -375,7 +395,7 @@ void DataLoader::load_slow5_reads_from_file(const std::string& path){
         fprintf(stderr,"Error in opening file\n");
         exit(EXIT_FAILURE);
     }
-    int64_t batch_size = slow5_batch;
+    int64_t batch_size = slow5_batchsize;
     int32_t num_threads = slow5_threads;
 
     while(1){
@@ -432,8 +452,20 @@ void DataLoader::load_slow5_reads_from_file(const std::string& path){
     }
 }
 
-DataLoader::DataLoader(ReadSink& read_sink, const std::string& device)
-        : m_read_sink(read_sink), m_device(device) {
+
+DataLoader::DataLoader(ReadSink& read_sink,
+                       const std::string& device,
+                       size_t num_worker_threads,
+                       size_t max_reads,
+                       int32_t slow5_threads,
+                       int64_t slow5_batchsize)
+        : m_read_sink(read_sink), m_device(device), m_num_worker_threads(num_worker_threads), slow5_threads(slow5_threads), slow5_batchsize(slow5_batchsize) {
+    m_max_reads = max_reads == 0 ? std::numeric_limits<decltype(m_max_reads)>::max() : max_reads;
+    assert(m_num_worker_threads > 0);
     static std::once_flag vbz_init_flag;
+#ifdef USE_FAST5
     std::call_once(vbz_init_flag, vbz_register);
+#endif
 }
+
+}  // namespace dorado
