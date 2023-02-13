@@ -1,6 +1,6 @@
 # slow5-dorado
 
-This is our fork of [Dorado](https://github.com/nanoporetech/dorado) that supports (S/BLOW5)[https://www.nature.com/articles/s41587-021-01147-4].
+This is our fork of [Dorado](https://github.com/nanoporetech/dorado) that supports [S/BLOW5](https://www.nature.com/articles/s41587-021-01147-4).
 Dorado is a high-performance, easy-to-use, open source basecaller for Oxford Nanopore reads.
 
 ## Features
