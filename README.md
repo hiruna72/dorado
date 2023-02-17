@@ -1,7 +1,7 @@
 # slow5-dorado
 
 This is our fork of [Dorado](https://github.com/nanoporetech/dorado) that supports [S/BLOW5](https://www.nature.com/articles/s41587-021-01147-4).
-Dorado is a high-performance, easy-to-use, open source basecaller for Oxford Nanopore reads. For typical simplex basecalling and mod calling with S/BLOW5, we recommend using [buttery-eel](https://github.com/Psy-Fer/buttery-eel) wrapper with Guppy. At the moment, this branch is primarily for duplex calling with S/BLOW5.
+Dorado is a high-performance, easy-to-use, open source basecaller for Oxford Nanopore reads. For typical simplex basecalling and mod calling with S/BLOW5, we recommend using [buttery-eel](https://github.com/Psy-Fer/buttery-eel) wrapper with Guppy. At the moment, this fork is primarily for duplex calling with S/BLOW5.
 
 ## Features
 
