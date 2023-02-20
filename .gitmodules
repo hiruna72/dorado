@@ -31,6 +31,9 @@
 [submodule "dorado/3rdparty/spdlog"]
 	path = dorado/3rdparty/spdlog
 	url = https://github.com/gabime/spdlog
+[submodule "cmake/ios-cmake"]
+	path = cmake/ios-cmake
+	url = https://github.com/leetal/ios-cmake.git
 [submodule "dorado/3rdparty/slow5lib"]
 	path = dorado/3rdparty/slow5lib
 	url = https://github.com/hasindu2008/slow5lib.git

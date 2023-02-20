@@ -3,6 +3,13 @@ set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
 
 project(dorado)
 
+if (NOT EXISTS ${CMAKE_BINARY_DIR}/CMakeCache.txt)
+  if (NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "" FORCE)
+  endif()
+endif()
+message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(DORADO_3RD_PARTY ${CMAKE_CURRENT_SOURCE_DIR}/dorado/3rdparty)
@@ -106,6 +113,8 @@ set(LIB_SOURCE_FILES
         dorado/utils/bam_utils.h
         dorado/utils/duplex_utils.h
         dorado/utils/duplex_utils.cpp
+        dorado/utils/basecaller_utils.h
+        dorado/utils/basecaller_utils.cpp
         dorado/data_loader/slow5_thread.h
         dorado/data_loader/slow5_thread.cpp)
 
@@ -145,22 +154,23 @@ set_target_properties(dorado_lib
         )
 
 include_directories(${CMAKE_CURRENT_BINARY_DIR}/dorado
-        ${HDF5_INCLUDE_DIRS}
-        ${KOI_INCLUDE}
-        ${POD5_INCLUDE}
-        dorado/3rdparty/HighFive/include
-        dorado/3rdparty/catch2
-        dorado/3rdparty/argparse
-        dorado/3rdparty/toml11
-        dorado/3rdparty/cpp-httplib
-        dorado/3rdparty/metal-cpp/metal-cpp
-        dorado/3rdparty/hdf_plugins/vbz_plugin
-        ${HTSLIB_DIR}
-        dorado/3rdparty/cxxpool/src
-        dorado/3rdparty/NVTX/c/include
-        dorado
-        dorado/3rdparty/spdlog/include
-        )
+    ${TORCH_INCLUDE_DIRS}
+    ${HDF5_INCLUDE_DIRS}
+    ${KOI_INCLUDE}
+    ${POD5_INCLUDE}
+    dorado/3rdparty/HighFive/include
+    dorado/3rdparty/catch2
+    dorado/3rdparty/argparse
+    dorado/3rdparty/toml11
+    dorado/3rdparty/cpp-httplib
+    dorado/3rdparty/metal-cpp/metal-cpp
+    dorado/3rdparty/hdf_plugins/vbz_plugin
+    ${HTSLIB_DIR}
+    dorado/3rdparty/cxxpool/src
+    dorado/3rdparty/NVTX/c/include
+    dorado
+    dorado/3rdparty/spdlog/include
+    )
 
 enable_testing()
 
@@ -192,6 +202,10 @@ target_link_libraries(dorado_lib
         edlib
         elzip
         )
+
+if(APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    target_link_libraries(dorado_lib ${IOKIT})
+endif()
 
 if(NOT WIN32)
     add_dependencies(dorado_lib htslib_project)
@@ -229,7 +243,10 @@ if(NOT DORADO_LIB_ONLY)
             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
             )
 
-    target_link_libraries(dorado dorado_lib)
+    target_link_libraries(dorado
+        dorado_lib
+        dorado_io_lib
+    )
 
     if (DEFINED DORADO_INSTALL_PATH)
         set(CMAKE_INSTALL_PREFIX ${DORADO_INSTALL_PATH})
@@ -279,6 +296,30 @@ elseif(APPLE)
 endif()
 
 #add_subdirectory(tests)
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    add_library(dorado_io_lib
+        dorado/data_loader/DataLoader.cpp
+        dorado/data_loader/DataLoader.h
+        dorado/utils/models.cpp
+        dorado/utils/models.h
+    )
+
+    target_link_libraries(dorado_io_lib
+       OpenSSL::SSL
+       ${POD5_LIBRARIES}
+       ${HDF5_C_LIBRARIES}
+       ${CMAKE_DL_LIBS}       
+       elzip
+    )
+
+    set_target_properties(dorado_io_lib
+        PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+    )
+
+    add_subdirectory(tests)
+endif()
 
 if(NOT DORADO_LIB_ONLY)
     include(cmake/DoradoPackaging.cmake)
