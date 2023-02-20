@@ -186,12 +186,12 @@ void DataLoader::load_reads(const std::string& path) {
 std::unordered_map<std::string, ReadGroup> DataLoader::load_read_groups(std::string data_path,
                                                                         std::string model_path) {
     std::unordered_map<std::string, ReadGroup> read_groups;
+#ifdef USE_POD5
 
     for (const auto& entry : std::filesystem::directory_iterator(data_path)) {
         std::string ext = std::filesystem::path(entry).extension().string();
         std::transform(ext.begin(), ext.end(), ext.begin(),
                        [](unsigned char c) { return std::tolower(c); });
-#ifdef USE_POD5
         if (ext == ".pod5") {
             pod5_init();
 
@@ -257,8 +257,9 @@ std::unordered_map<std::string, ReadGroup> DataLoader::load_read_groups(std::str
 
             pod5_close_and_free_reader(file);
         }
-#endif
     }
+#endif
+
     return read_groups;
 }
 #ifdef USE_POD5
