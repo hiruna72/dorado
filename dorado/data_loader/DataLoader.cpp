@@ -495,11 +495,12 @@ void DataLoader::load_slow5_reads_from_file(const std::string& path){
     int64_t batch_size = slow5_batchsize;
     int32_t num_threads = slow5_threads;
 
+
     while(1){
         int flag_EOF = 0;
         db_t db = { 0 };
-        db.mem_records = (char **) malloc(batch_size * sizeof *db.read_id);
-        db.mem_bytes = (size_t *) malloc(batch_size * sizeof *db.read_id);
+        db.mem_records = (char **) malloc(batch_size * sizeof *db.mem_records);
+        db.mem_bytes = (size_t *) malloc(batch_size * sizeof *db.mem_bytes);
 
         int64_t record_count = 0;
         size_t bytes;
@@ -535,8 +536,11 @@ void DataLoader::load_slow5_reads_from_file(const std::string& path){
         work_db(&core,&db,create_read_data);
 
         for (int64_t i = 0; i < record_count; i++) {
-            m_read_sink.push_read(db.read_data_ptrs[i]);
-            m_loaded_read_count++;
+            if (m_allowed_read_ids.size() == 0 ||
+                (m_allowed_read_ids.find(db.read_data_ptrs[i]->read_id) != m_allowed_read_ids.end())) {
+                m_read_sink.push_read(db.read_data_ptrs[i]);
+                m_loaded_read_count++;
+            }
         }
 
         // Free everything
