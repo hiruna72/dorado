@@ -20,7 +20,7 @@ If you encounter any problems building or running sow5-dorado please [report an 
 Binaries are provided for Linux x64 under [Relases](https://github.com/hiruna72/slow5-dorado/releases/). 
 
 ```
-wget https://github.com/hiruna72/slow5-dorado/releases/download/v0.1.1/slow5-dorado-v0.1.1-x86_64-linux.tar.gz -O slow5-dorado.tar.gz
+wget https://github.com/hiruna72/slow5-dorado/releases/download/v0.2.1/slow5-dorado-v0.2.1-x86_64-linux.tar.gz -O slow5-dorado.tar.gz
 tar xf slow5-dorado.tar.gz
 cd slow5-dorado/bin
 ./slow5-dorado --version
@@ -32,35 +32,28 @@ To run slow5-dorado, download a model and point it to S/BLOW5 files.
 
 ```
 
-$ slow5-dorado download --model dna_r10.4.1_e8.2_260bps_hac@v4.0.0
-$ slow5-dorado basecaller dna_r10.4.1_e8.2_260bps_hac@v4.0.0 BLOW5s/ > calls.sam # blow5 directory
-$ slow5-dorado basecaller dna_r10.4.1_e8.2_260bps_hac@v4.0.0 merged.blow5 >calls.sam # a single BLOW5 file
+$ slow5-dorado download --model dna_r10.4.1_e8.2_400bps_hac@v4.0.0
+$ slow5-dorado basecaller dna_r10.4.1_e8.2_400bps_hac@v4.0.0 BLOW5s/ > calls.sam # blow5 directory
+$ slow5-dorado basecaller dna_r10.4.1_e8.2_400bps_hac@v4.0.0 merged.blow5 >calls.sam # a single BLOW5 file
 ```
 
 To call modifications simply add `--modified-bases`.
 
 ```
-$ slow5-dorado basecaller dna_r10.4.1_e8.2_260bps_hac@v4.0.0 BLOW5s/ --modified-bases 5mCG_5hmCG > calls.sam
+$ slow5-dorado basecaller dna_r10.4.1_e8.2_400bps_hac@v4.0.0 BLOW5s/ --modified-bases 5mCG_5hmCG > calls.sam
 ```
 
 For unaligned BAM output, dorado output can be piped to BAM using samtoools:
 
 ```
-$ slow5-dorado basecaller dna_r10.4.1_e8.2_260bps_hac@v4.0.0 BLOW5s/ | samtools view -Sh > calls.bam
+$ slow5-dorado basecaller dna_r10.4.1_e8.2_400bps_hac@v4.0.0 BLOW5s/ | samtools view -Sh > calls.bam
 ```
 
 Stereo Duplex Calling:
 
 ```
-$ slow5-dorado duplex dna_r10.4.1_e8.2_260bps_sup@v4.0.0 BLOW5s/ --pairs pairs.txt > duplex.sam
+$ slow5-dorado duplex dna_r10.4.1_e8.2_400bps_sup@v4.0.0 BLOW5s/ --pairs pairs.txt > duplex.sam
 ```
-
-### ONT releases
-
- - [dorado-0.2.1-linux-x64](https://cdn.oxfordnanoportal.com/software/analysis/dorado-0.2.1-linux-x64.tar.gz)
- - [dorado-0.2.1-linux-arm64](https://cdn.oxfordnanoportal.com/software/analysis/dorado-0.2.1-linux-arm64.tar.gz)
- - [dorado-0.2.1-osx-arm64](https://cdn.oxfordnanoportal.com/software/analysis/dorado-0.2.1-osx-arm64.tar.gz)
- - [dorado-0.2.1-win64](https://cdn.oxfordnanoportal.com/software/analysis/dorado-0.2.1-win64.zip)
 
 ## Platforms
 
@@ -72,133 +65,6 @@ slow5-dorado has been tested on the following systems:
 
 Systems not listed above but which have Nvidia GPUs with >=8GB VRAM and architecture from Volta onwards have not been widely tested but are expected to work. If you encounter problems with running on your system please [report an issue](https://github.com/nanoporetech/dorado/issues)
 
-## Roadmap
-
-Dorado is still in alpha stage and not feature-complete, the following features form the core of our roadmap:
-
-1. DNA Barcode multiplexing
-2. Alignment *(output aligned BAMs)*.
-3. Python API
-
-## Performance tips
-
-1. slow5-dorado requires S/BLOW5 file input. Please [convert your Fast5 files](https://github.com/hasindu2008/slow5tools) before basecalling.
-2. Dorado will automatically detect your GPUs' free memory and select an appropriate batch size.
-3. Dorado will automatically run in multi-GPU (`'cuda:all'`) mode. If you have a hetrogenous collection of GPUs select the faster GPUs using the `--device` flag (e.g `--device "cuda:0,2`). Not doing this will have a detrimental impact on performance.
-
-## Running
-
-To run Dorado, download a model and point it to POD5 files _(Fast5 files are supported but will not be as performant)_.
-
-```
-$ dorado download --model dna_r10.4.1_e8.2_260bps_hac@v4.1.0
-$ dorado basecaller dna_r10.4.1_e8.2_260bps_hac@v4.1.0 pod5s/ > calls.sam
-```
-
-To call modifications simply add `--modified-bases`.
-
-```
-$ dorado basecaller dna_r10.4.1_e8.2_260bps_hac@v4.1.0 pod5s/ --modified-bases 5mCG_5hmCG > calls.sam
-```
-
-For unaligned BAM output, dorado output can be piped to BAM using samtoools:
-
-```
-$ dorado basecaller dna_r10.4.1_e8.2_260bps_hac@v4.1.0 pod5s/ | samtools view -Sh > calls.bam
-```
-
-Stereo Duplex Calling:
-
-```
-$ dorado duplex dna_r10.4.1_e8.2_260bps_sup@v4.1.0 pod5s/ --pairs pairs.txt > duplex.sam
-```
-
-See [duplex-tools](https://github.com/nanoporetech/duplex-tools#usage-with-dorado-recommended) for creating a `pairs.txt`.
-
-## Available basecalling models
-
-To download all available dorado models run:
-
-```
-$ dorado download --model all
-```
-
-The latest simplex models are v4.1.0:
-
-* dna_r10.4.1_e8.2_260bps_fast@v4.1.0
-* dna_r10.4.1_e8.2_260bps_hac@v4.1.0
-* dna_r10.4.1_e8.2_260bps_sup@v4.1.0
-* dna_r10.4.1_e8.2_400bps_fast@v4.1.0
-* dna_r10.4.1_e8.2_400bps_hac@v4.1.0
-* dna_r10.4.1_e8.2_400bps_sup@v4.1.0
-
-The following models are also available:
-
-* dna_r10.4.1_e8.2_260bps_fast@v4.0.0
-* dna_r10.4.1_e8.2_260bps_hac@v4.0.0
-* dna_r10.4.1_e8.2_260bps_sup@v4.0.0
-* dna_r10.4.1_e8.2_400bps_fast@v4.0.0
-* dna_r10.4.1_e8.2_400bps_hac@v4.0.0
-* dna_r10.4.1_e8.2_400bps_sup@v4.0.0
-* dna_r10.4.1_e8.2_260bps_fast@v3.5.2
-* dna_r10.4.1_e8.2_260bps_hac@v3.5.2
-* dna_r10.4.1_e8.2_260bps_sup@v3.5.2
-* dna_r10.4.1_e8.2_400bps_fast@v3.5.2
-* dna_r10.4.1_e8.2_400bps_hac@v3.5.2
-* dna_r10.4.1_e8.2_400bps_sup@v3.5.2
-* dna_r9.4.1_e8_fast@v3.4
-* dna_r9.4.1_e8_hac@v3.3
-* dna_r9.4.1_e8_sup@v3.3
-
-## Developer quickstart
-
-### Linux dependencies
-
-The following packages are necessary to build dorado in a barebones environment (e.g. the official ubuntu:jammy docker image)
-
-```
-$ apt-get update && apt-get install -y --no-install-recommends \
-        curl \
-        git \
-        ca-certificates \
-        build-essential \
-        nvidia-cuda-toolkit \
-        libhdf5-dev \
-        libssl-dev \
-        libzstd-dev \
-        cmake \
-        autoconf \
-        automake
-```
-
-### Clone and build
-
-```
-$ git clone https://github.com/nanoporetech/dorado.git dorado
-$ cd dorado
-$ cmake -S . -B cmake-build
-$ cmake --build cmake-build --config Release -j
-$ ctest --test-dir cmake-build
-```
-
-The `-j` flag will use all available threads to build dorado and usage is around 1-2GB per thread. If you are constrained
-by the amount of available memory on your system you can lower the number of threads i.e.` -j 4`.
-
-After building you can run dorado from the build directory `./cmake-build/bin/dorado` or install it somewhere else on your
-system i.e. `/opt` *(note: you will need the relevant permissions for the target installation directory)*.
-
-```
-$ cmake --install cmake-build --prefix /opt
-```
-
-### Pre commit
-
-The project uses pre-commit to ensure code is consistently formatted, you can set this up using pip:
-
-```bash
-$ pip install pre-commit
-$ pre-commit install
-```
 
 ### Licence and Copyright
 (c) 2022 Oxford Nanopore Technologies Ltd.
