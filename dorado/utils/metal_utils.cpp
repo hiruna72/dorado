@@ -4,20 +4,24 @@
 #if !TARGET_OS_IPHONE
 #include <IOKit/IOKitLib.h>
 #endif
-#include <Metal/Metal.hpp>
 #include <mach-o/dyld.h>
+#include <objc/objc-runtime.h>
 #include <spdlog/spdlog.h>
 #include <sys/sysctl.h>
 #include <sys/syslimits.h>
 #include <torch/torch.h>
 
+#include <cstdint>
 #include <filesystem>
+#include <optional>
+#include <string>
 
 using namespace MTL;
 
 namespace fs = std::filesystem;
 
 namespace {
+
 // Allows less ugliness in use of std::visit.
 template <class... Ts>
 struct overloaded : Ts... {
@@ -26,7 +30,17 @@ struct overloaded : Ts... {
 template <class... Ts>
 overloaded(Ts...) -> overloaded<Ts...>;
 
-NS::String *get_library_location() {
+// Note: NS::String objects created via NS::String::string are placed in the autorelease pool,
+// which means they will be released at a later time dictated by the autorelease pool setup.
+// Setting up an NS::SharedPtr via NS::TransferPtr to hold them will result in an invalid attempt
+// to free them a second time, entailing sending a message to a destroyed object, generally
+// leading to invalid address accesses.  This is in contrast to other NSObjects here created
+// using methods beginning with Create, alloc, new, which do require releasing via NS::SharedPtr
+// or other means.
+// Functions here that create autorelease objects should be called with an autorelease pool set up,
+// which on MacOS isn't the case unless something like ScopedAutoReleasePool is used.
+
+auto get_library_location() {
     char ns_path[PATH_MAX + 1];
     uint32_t size = sizeof(ns_path);
     _NSGetExecutablePath(ns_path, &size);
@@ -58,15 +72,14 @@ std::string cfstringref_to_string(const CFStringRef cfstringref) {
 
 #if !TARGET_OS_IPHONE
 
-// Retrieves a dictionary of int64_t properties associated with a given service/property.
-// Returns true on success.
-bool retrieve_ioreg_props(const std::string &service_class,
-                          const std::string &property_name,
-                          std::unordered_map<std::string, int64_t> &props) {
+// Retrieves a single int64_t property associated with the given class/name.
+// Returns empty std::optional on failure.
+std::optional<int64_t> retrieve_ioreg_prop(const std::string &service_class,
+                                           const std::string &property_name) {
     // Look for a service matching the supplied class name.
     CFMutableDictionaryRef matching_dict = IOServiceMatching(service_class.c_str());
     if (!matching_dict) {
-        return false;
+        return std::nullopt;
     }
     // Note: kIOMainPortDefault was introduced on MacOS 12.  If support for earlier versions
     // is needed an alternate constant will be needed.
@@ -74,7 +87,7 @@ bool retrieve_ioreg_props(const std::string &service_class,
     // to release it ourselves.
     io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, matching_dict);
     if (!service) {
-        return false;
+        return std::nullopt;
     }
 
     // Create a CF representation of the registry property of interest.
@@ -85,37 +98,18 @@ bool retrieve_ioreg_props(const std::string &service_class,
     IOObjectRelease(service);
     CFRelease(cfs_property_name);
     if (!property) {
-        return false;
+        return std::nullopt;
     }
-    if (CFGetTypeID(property) != CFDictionaryGetTypeID()) {
-        CFRelease(property);
-        return false;
-    }
-
-    // Retrieve entries with integer keys from the CFDictionary we constructed.
-
-    // No implicit conversion from lambda to function pointer if it captures, so
-    // just use the context parameter to point to the unordered_map being populated.
-    const auto process_kvs = [](CFTypeRef key_ref, CFTypeRef value_ref, void *ctx) {
-        auto props_ptr = static_cast<std::unordered_map<std::string, int64_t> *>(ctx);
-        // Presumably keys are always strings -- ignore anything that isn't.
-        // Also ignore non-integer values, of which there are examples that are not
-        // currently relevant.
-        if (CFGetTypeID(key_ref) != CFStringGetTypeID() ||
-            CFGetTypeID(value_ref) != CFNumberGetTypeID())
-            return;
-        const std::string key = cfstringref_to_string(static_cast<CFStringRef>(key_ref));
+    if (CFGetTypeID(property) == CFNumberGetTypeID()) {
         int64_t value = -1;
-        if (!CFNumberGetValue(static_cast<CFNumberRef>(value_ref), kCFNumberSInt64Type, &value)) {
-            return;
+        if (!CFNumberGetValue(static_cast<CFNumberRef>(property), kCFNumberSInt64Type, &value)) {
+            return std::nullopt;
         }
-        props_ptr->insert({key, value});
-    };
+        return std::make_optional<int64_t>(value);
+    }
 
-    CFDictionaryApplyFunction(static_cast<CFDictionaryRef>(property), process_kvs, &props);
-    CFRelease(property);
-
-    return true;
+    // It was not of the expected type.
+    return std::nullopt;
 }
 
 #endif  // if !TARGET_OS_IPHONE
@@ -124,28 +118,27 @@ bool retrieve_ioreg_props(const std::string &service_class,
 
 namespace dorado::utils {
 
-MTL::Buffer *create_buffer(MTL::Device *device, size_t length) {
-    return device->newBuffer(length, MTL::ResourceStorageModeShared);
+NS::SharedPtr<MTL::Buffer> create_buffer(MTL::Device *device, size_t length) {
+    return NS::TransferPtr(device->newBuffer(length, MTL::ResourceStorageModeShared));
 }
 
-MTL::ComputePipelineState *make_cps(
+NS::SharedPtr<MTL::ComputePipelineState> make_cps(
         MTL::Device *const device,
         const std::string &name,
         const std::vector<std::tuple<std::string, MetalConstant>> &named_constants,
         const int max_total_threads_per_tg) {
     NS::Error *error;
-    auto default_library = device->newDefaultLibrary();
+    auto default_library = NS::TransferPtr(device->newDefaultLibrary());
 
     if (!default_library) {
         auto lib_path = get_library_location();
-        default_library = device->newLibrary(lib_path, &error);
+        default_library = NS::TransferPtr(device->newLibrary(lib_path, &error));
         if (!default_library) {
             throw std::runtime_error("Failed to load metallib library.");
         }
     }
 
-    auto constant_vals = FunctionConstantValues::alloc();
-    constant_vals->init();
+    auto constant_vals = NS::TransferPtr(FunctionConstantValues::alloc()->init());
     for (auto &[name, constant] : named_constants) {
         const auto ns_name = NS::String::string(name.c_str(), NS::ASCIIStringEncoding);
         std::visit(overloaded{[&](int val) {
@@ -161,22 +154,20 @@ MTL::ComputePipelineState *make_cps(
     }
 
     auto kernel_name = NS::String::string(name.c_str(), NS::ASCIIStringEncoding);
-    auto kernel = default_library->newFunction(kernel_name, constant_vals, &error);
-    CFRelease(constant_vals);
+    auto kernel =
+            NS::TransferPtr(default_library->newFunction(kernel_name, constant_vals.get(), &error));
     if (!kernel) {
         throw std::runtime_error("Failed to find the kernel: " + name);
     }
 
-    auto cp_descriptor = MTL::ComputePipelineDescriptor::alloc();
-    cp_descriptor->init();
-    cp_descriptor->setComputeFunction(kernel);
+    auto cp_descriptor = NS::TransferPtr(MTL::ComputePipelineDescriptor::alloc()->init());
+    cp_descriptor->setComputeFunction(kernel.get());
     if (max_total_threads_per_tg != -1)
         cp_descriptor->setMaxTotalThreadsPerThreadgroup(max_total_threads_per_tg);
 
-    auto cps = device->newComputePipelineState(cp_descriptor, MTL::PipelineOptionNone, nullptr,
-                                               &error);
-    CFRelease(cp_descriptor);
-    if (cps == nullptr) {
+    auto cps = NS::TransferPtr(device->newComputePipelineState(
+            cp_descriptor.get(), MTL::PipelineOptionNone, nullptr, &error));
+    if (!cps) {
         auto e_code = std::to_string(((int)error->code()));
         auto e_str = error->domain()->cString(NS::ASCIIStringEncoding);
         throw std::runtime_error("failed to build compute pipeline for " + name + " - " + e_str +
@@ -225,7 +216,7 @@ void launch_kernel_no_wait(ComputePipelineState *const pipeline,
     compute_encoder->endEncoding();
 }
 
-static MTL::Device *mtl_device{nullptr};
+static NS::SharedPtr<MTL::Device> mtl_device;
 
 struct MTLAllocator : torch::Allocator {
     virtual ~MTLAllocator() = default;
@@ -244,9 +235,9 @@ struct MTLAllocator : torch::Allocator {
 };
 static MTLAllocator mtl_allocator;
 
-MTL::Device *get_mtl_device() {
-    if (mtl_device == nullptr) {
-        mtl_device = MTL::CreateSystemDefaultDevice();
+NS::SharedPtr<MTL::Device> get_mtl_device() {
+    if (!mtl_device) {
+        mtl_device = NS::TransferPtr(MTL::CreateSystemDefaultDevice());
         torch::SetAllocator(torch::DeviceType::CPU, &mtl_allocator);
     }
     return mtl_device;
@@ -260,13 +251,11 @@ int get_mtl_device_core_count() {
 
 #if !TARGET_OS_IPHONE
     // Attempt to directly query the GPU core count.
-    std::unordered_map<std::string, int64_t> gpu_specs;
-    if (retrieve_ioreg_props("AGXAccelerator", "GPUConfigurationVariable", gpu_specs)) {
-        if (auto gpu_cores_it = gpu_specs.find("num_cores"); gpu_cores_it != gpu_specs.cend()) {
-            gpu_core_count = gpu_cores_it->second;
-            spdlog::debug("Retrieved GPU core count of {} from IO Registry", gpu_core_count);
-            return gpu_core_count;
-        }
+    if (auto core_count_opt = retrieve_ioreg_prop("AGXAccelerator", "gpu-core-count");
+        core_count_opt.has_value()) {
+        gpu_core_count = static_cast<int>(core_count_opt.value());
+        spdlog::debug("Retrieved GPU core count of {} from IO Registry", gpu_core_count);
+        return gpu_core_count;
     }
 #endif  // if !TARGET_OS_IPHONE
 
@@ -322,18 +311,32 @@ int get_apple_cpu_perf_core_count() {
 }
 
 MTL::Buffer *mtl_for_tensor(const torch::Tensor &x) {
+    // Metal kernels assume contiguity.
+    if (!x.is_contiguous())
+        throw std::runtime_error("Tensor is not contiguous");
     auto ptr = (MTL::Buffer *)(x.storage().data_ptr().get_context());
     assert(ptr != nullptr);
     return ptr;
 }
 
-MTL::Buffer *extract_mtl_from_tensor(torch::Tensor &x) {
-    auto bfr = mtl_for_tensor(x);
-    bfr->retain();
+NS::SharedPtr<MTL::Buffer> extract_mtl_from_tensor(torch::Tensor &&x) {
+    auto bfr = NS::RetainPtr(mtl_for_tensor(x));
     x.reset();
     return bfr;
 }
 
-int auto_gpu_batch_size() { return 48 * get_mtl_device_core_count(); }
+ScopedAutoReleasePool::ScopedAutoReleasePool() {
+    Class ns_autorelease_pool_class = objc_getClass("NSAutoreleasePool");
+    id autorelease_pool_alloc =
+            ((id(*)(Class, SEL))objc_msgSend)(ns_autorelease_pool_class, sel_registerName("alloc"));
+    m_autorelease_pool =
+            ((id(*)(id, SEL))objc_msgSend)(autorelease_pool_alloc, sel_registerName("init"));
+}
+
+ScopedAutoReleasePool::~ScopedAutoReleasePool() {
+    // Note: This destroys the autorelease pool object itself, along with the objects it is responsible
+    // for deleting.
+    ((void (*)(id, SEL))objc_msgSend)(m_autorelease_pool, sel_registerName("drain"));
+}
 
 }  // namespace dorado::utils

@@ -2,7 +2,11 @@ set(OPENSSL_USE_STATIC_LIBS TRUE)
 
 if(APPLE)
     if(NOT DEFINED OPENSSL_ROOT_DIR)
-      set(OPENSSL_ROOT_DIR "/opt/homebrew/opt/openssl@3")
+        if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
+            set(OPENSSL_ROOT_DIR "/usr/local/opt/openssl@1.1")
+        else()
+            set(OPENSSL_ROOT_DIR "/opt/homebrew/opt/openssl@1.1")
+        endif()
     endif()
 elseif(WIN32)
     if(NOT DEFINED OPENSSL_ROOT_DIR)
@@ -13,4 +17,4 @@ endif()
 
 set(CMAKE_PREFIX_PATH ${OPENSSL_ROOT_DIR} ${CMAKE_PREFIX_PATH}) # put the selected openssl path before any older imported one.
 
-find_package(OpenSSL REQUIRED)
+find_package(OpenSSL REQUIRED QUIET)

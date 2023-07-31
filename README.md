@@ -17,7 +17,7 @@ If you encounter any problems building or running sow5-dorado please [report an 
 
 ## Installation
 
-Binaries are provided for Linux x64 under [Relases](https://github.com/hiruna72/slow5-dorado/releases/). 
+Binaries are provided for Linux x64 under [Relases](https://github.com/hiruna72/slow5-dorado/releases/).
 
 ```
 wget https://github.com/hiruna72/slow5-dorado/releases/download/v0.2.1/slow5-dorado-v0.2.1-x86_64-linux.tar.gz -O slow5-dorado.tar.gz

@@ -1,62 +1,41 @@
+#include "MessageSinkUtils.h"
 #include "TestUtils.h"
 #include "data_loader/DataLoader.h"
 #include "read_pipeline/ReadPipeline.h"
 
 #include <catch2/catch.hpp>
 
+#include <memory>
+#include <string>
+#include <vector>
+
 #define TEST_GROUP "Fast5DataLoaderTest: "
 
-class MockSink : public dorado::ReadSink {
-public:
-    MockSink() : ReadSink(1000) {}
-    size_t get_read_count() { return m_reads.size(); }
-};
-
 TEST_CASE(TEST_GROUP "Test loading single-read Fast5 files") {
-    // Create a mock sink for testing output of reads
-    MockSink mock_sink;
-
-    std::string data_path(get_fast5_data_dir());
-    dorado::DataLoader loader(mock_sink, "cpu", 1);
-    loader.load_reads(data_path);
-
-    REQUIRE(mock_sink.get_read_count() == 1);
+    CHECK(CountSinkReads(get_fast5_data_dir(), "cpu", 1) == 1);
 }
 
 TEST_CASE(TEST_GROUP "Test loading single-read Fast5 file, empty read list") {
-    // Create a mock sink for testing output of reads
-    MockSink mock_sink;
-
     auto read_list = std::unordered_set<std::string>();
-    std::string data_path(get_fast5_data_dir());
-    dorado::DataLoader loader(mock_sink, "cpu", 1, 0, read_list);
-    loader.load_reads(data_path);
+    CHECK(CountSinkReads(get_fast5_data_dir(), "cpu", 1, 0, read_list) == 0);
+}
 
-    REQUIRE(mock_sink.get_read_count() == 1);
+TEST_CASE(TEST_GROUP "Test loading single-read Fast5 file, no read list") {
+    CHECK(CountSinkReads(get_fast5_data_dir(), "cpu", 1, 0, std::nullopt) == 1);
 }
 
 TEST_CASE(TEST_GROUP "Test loading single-read Fast5 file, mismatched read list") {
-    // Create a mock sink for testing output of reads
-    MockSink mock_sink;
-
-    auto read_list = std::unordered_set<std::string>();
-    read_list.insert("read_1");
-    std::string data_path(get_fast5_data_dir());
-    dorado::DataLoader loader(mock_sink, "cpu", 1, 0, read_list);
-    loader.load_reads(data_path);
-
-    REQUIRE(mock_sink.get_read_count() == 0);
+    auto read_list = std::unordered_set<std::string>{"read_1"};
+    CHECK(CountSinkReads(get_fast5_data_dir(), "cpu", 1, 0, read_list) == 0);
 }
 
 TEST_CASE(TEST_GROUP "Test loading single-read Fast5 file, matched read list") {
-    // Create a mock sink for testing output of reads
-    MockSink mock_sink;
+    // read present in Fast5 file
+    auto read_list = std::unordered_set<std::string>{"59097f00-0f1c-4fac-aea2-3c23d79b0a58"};
+    CHECK(CountSinkReads(get_fast5_data_dir(), "cpu", 1, 0, read_list) == 1);
+}
 
-    auto read_list = std::unordered_set<std::string>();
-    read_list.insert("59097f00-0f1c-4fac-aea2-3c23d79b0a58");  // read present in Fast5 file
+TEST_CASE(TEST_GROUP "Test loading sample rate from fast5 returns nullopt") {
     std::string data_path(get_fast5_data_dir());
-    dorado::DataLoader loader(mock_sink, "cpu", 1, 0, read_list);
-    loader.load_reads(data_path);
-
-    REQUIRE(mock_sink.get_read_count() == 1);
+    CHECK(dorado::DataLoader::get_sample_rate(data_path) == 6024);
 }
