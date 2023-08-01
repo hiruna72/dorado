@@ -24,3 +24,4 @@ dorado/3rdparty/openssl-win
 dorado/3rdparty/torch-*
 dorado/3rdparty/vbz_plugin
 dorado/3rdparty/zlib-1.2.*
+models

@@ -199,9 +199,15 @@ set(LIB_SOURCE_FILES
     dorado/utils/uuid_utils.cpp
     dorado/utils/uuid_utils.h
     dorado/utils/read_utils.h
-    dorado/utils/read_utils.cpp
-    dorado/data_loader/slow5_thread.h
-    dorado/data_loader/slow5_thread.cpp)
+    dorado/utils/read_utils.cpp)
+
+function(add_slow5lib)
+    include_directories(dorado/3rdparty/slow5lib/include)
+    include_directories(dorado/3rdparty/slow5lib/src)
+    add_subdirectory(dorado/3rdparty/slow5lib)
+endfunction()
+
+add_slow5lib()
 
 if (DORADO_GPU_BUILD)
     if(APPLE)
@@ -287,7 +293,6 @@ target_link_libraries(dorado_lib
     ${TORCH_LIBRARIES}
     ${KOI_LIBRARIES}
     htslib
-    vbz_hdf_plugin
     OpenSSL::SSL
     edlib
     date::date
@@ -488,6 +493,8 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
     add_library(dorado_io_lib
         dorado/data_loader/DataLoader.cpp
         dorado/data_loader/DataLoader.h
+        dorado/data_loader/slow5_thread.h
+        dorado/data_loader/slow5_thread.cpp
     )
 
     target_link_libraries(dorado_io_lib

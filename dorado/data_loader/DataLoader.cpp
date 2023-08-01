@@ -803,14 +803,8 @@ namespace dorado {
 #include "slow5_extra.h"
 #include "slow5_thread.h"
 
-namespace {
-
-// ReadID should be a drop-in replacement for read_id_t
-    static_assert(sizeof(dorado::ReadID) == sizeof(read_id_t));
-}  // namespace
-
 namespace dorado {
-    void DataLoader::load_reads(const std::string& path,
+    void DataLoader::load_reads(const std::string &path,
                                 bool recursive_file_loading,
                                 ReadOrder traversal_order) {
         if (!std::filesystem::exists(path)) {
@@ -819,28 +813,29 @@ namespace dorado {
         }
         if (!std::filesystem::is_directory(path)) {
             std::string ext = std::filesystem::path(path).extension().string();
-            std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c){ return std::tolower(c); });
-            if(ext == ".slow5" || ext == ".blow5") {
+            std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return std::tolower(c); });
+            if (ext == ".slow5" || ext == ".blow5") {
                 load_slow5_reads_from_file(path);
             }
-        }else{
-            for (const auto & entry : std::filesystem::directory_iterator(path)) {
+        } else {
+            for (const auto &entry: std::filesystem::directory_iterator(path)) {
                 std::string ext = std::filesystem::path(entry).extension().string();
-                std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c){ return std::tolower(c); });
-                if(ext == ".slow5" || ext == ".blow5") {
+                std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return std::tolower(c); });
+                if (ext == ".slow5" || ext == ".blow5") {
                     load_slow5_reads_from_file(entry.path().string());
                 }
+            }
         }
     }
 
     int DataLoader::get_num_reads(std::string data_path,
                                   std::optional<std::unordered_set<std::string>> read_list,
-                                  const std::unordered_set<std::string>& ignore_read_list,
+                                  const std::unordered_set<std::string> &ignore_read_list,
                                   bool recursive_file_loading) {
         size_t num_reads = 0;
 
-        auto iterate_directory = [&](const auto& iterator_fn) {
-            for (const auto& entry : iterator_fn(data_path)) {
+        auto iterate_directory = [&](const auto &iterator_fn) {
+            for (const auto &entry: iterator_fn(data_path)) {
                 std::string ext = std::filesystem::path(entry).extension().string();
                 std::transform(ext.begin(), ext.end(), ext.begin(),
                                [](unsigned char c) { return std::tolower(c); });
@@ -848,12 +843,12 @@ namespace dorado {
         };
 
         if (recursive_file_loading) {
-            iterate_directory([](const auto& path) {
+            iterate_directory([](const auto &path) {
                 return std::filesystem::recursive_directory_iterator(path);
             });
         } else {
             iterate_directory(
-                    [](const auto& path) { return std::filesystem::directory_iterator(path); });
+                    [](const auto &path) { return std::filesystem::directory_iterator(path); });
         }
 
         // Remove the reads in the ignore list from the total dataset read count.
@@ -873,16 +868,16 @@ namespace dorado {
     }
 
     void DataLoader::load_read_channels(std::string data_path, bool recursive_file_loading) {
-        auto iterate_directory = [&](const auto& iterator_fn) {
+        auto iterate_directory = [&](const auto &iterator_fn) {
         };
 
         if (recursive_file_loading) {
-            iterate_directory([](const auto& path) {
+            iterate_directory([](const auto &path) {
                 return std::filesystem::recursive_directory_iterator(path);
             });
         } else {
             iterate_directory(
-                    [](const auto& path) { return std::filesystem::directory_iterator(path); });
+                    [](const auto &path) { return std::filesystem::directory_iterator(path); });
         }
     }
 
@@ -892,8 +887,8 @@ namespace dorado {
             bool recursive_file_loading) {
         std::unordered_map<std::string, ReadGroup> read_groups;
 
-        auto iterate_directory = [&](const auto& iterator_fn) {
-            for (const auto& entry : iterator_fn(data_path)) {
+        auto iterate_directory = [&](const auto &iterator_fn) {
+            for (const auto &entry: iterator_fn(data_path)) {
                 std::string ext = std::filesystem::path(entry).extension().string();
                 std::transform(ext.begin(), ext.end(), ext.begin(),
                                [](unsigned char c) { return std::tolower(c); });
@@ -901,12 +896,12 @@ namespace dorado {
         };
 
         if (recursive_file_loading) {
-            iterate_directory([](const auto& path) {
+            iterate_directory([](const auto &path) {
                 return std::filesystem::recursive_directory_iterator(path);
             });
         } else {
             iterate_directory(
-                    [](const auto& path) { return std::filesystem::directory_iterator(path); });
+                    [](const auto &path) { return std::filesystem::directory_iterator(path); });
         }
 
         return read_groups;
@@ -915,26 +910,52 @@ namespace dorado {
     uint16_t DataLoader::get_sample_rate(std::string data_path, bool recursive_file_loading) {
         std::optional<uint16_t> sample_rate = std::nullopt;
 
-        auto iterate_directory = [&](const auto& iterator_fn) {
-            for (const auto& entry : iterator_fn((data_path))) {
+        auto iterate_directory = [&](const auto &iterator_fn) {
+            for (const auto &entry: iterator_fn((data_path))) {
                 std::string ext = std::filesystem::path(entry).extension().string();
                 std::transform(ext.begin(), ext.end(), ext.begin(),
                                [](unsigned char c) { return std::tolower(c); });
                 auto file_path = entry.path().string();
-                // Break out of loop if sample rate is found.
-                if (sample_rate) {
-                    break;
+                if (ext != ".slow5" and ext != ".blow5") {
+                    continue;
                 }
+
+                //open the SLOW5 file
+                slow5_file_t *sp = slow5_open(file_path.c_str(),"r");
+                if(sp==NULL){
+                    fprintf(stderr,"Error in opening file\n");
+                    exit(EXIT_FAILURE);
+                }
+
+                slow5_rec_t *rec = NULL; //slow5 record to be read
+                int ret=0; //for return value
+
+                //iterate through the file until end
+                while((ret = slow5_get_next(&rec,sp)) >= 0){
+                    sample_rate = rec->sampling_rate;
+                    // Break out of loop if sample rate is found.
+                    if (sample_rate) {
+                        break;
+                    }
+
+                }
+
+                //free the SLOW5 record
+                slow5_rec_free(rec);
+
+                //close the SLOW5 file
+                slow5_close(sp);
+
             }
         };
 
         if (recursive_file_loading) {
-            iterate_directory([](const auto& path) {
+            iterate_directory([](const auto &path) {
                 return std::filesystem::recursive_directory_iterator(path);
             });
         } else {
             iterate_directory(
-                    [](const auto& path) { return std::filesystem::directory_iterator(path); });
+                    [](const auto &path) { return std::filesystem::directory_iterator(path); });
         }
 
         if (sample_rate) {
@@ -955,37 +976,37 @@ namespace dorado {
         auto new_read = std::make_shared<dorado::Read>();
 
         //
-        std::vector<int16_t> tmp(rec->raw_signal,rec->raw_signal+rec->len_raw_signal);
+        std::vector<int16_t> tmp(rec->raw_signal, rec->raw_signal + rec->len_raw_signal);
 //    std::vector<float> floatTmp(tmp.begin(), tmp.end());
 
         int ret = 0;
         uint64_t start_time = slow5_aux_get_uint64(rec, "start_time", &ret);
-        if(ret!=0){
+        if (ret != 0) {
             throw std::runtime_error("Error in getting auxiliary attribute 'start_time' from the file.");
         }
         ret = 0;
         uint32_t mux = slow5_aux_get_uint8(rec, "start_mux", &ret);
-        if(ret!=0){
+        if (ret != 0) {
             throw std::runtime_error("Error in getting auxiliary attribute 'start_mux' from the file.");
         }
         ret = 0;
         int32_t read_number = slow5_aux_get_int32(rec, "read_number", &ret);
-        if(ret!=0){
+        if (ret != 0) {
             throw std::runtime_error("Error in getting auxiliary attribute 'read_number' from the file.");
         }
         ret = 0;
         uint64_t len;
         std::string channel_number_str = slow5_aux_get_string(rec, "channel_number", &len, &ret);
-        if(ret!=0){
+        if (ret != 0) {
             throw std::runtime_error("Error in getting auxiliary attribute 'channel_number' from the file.");
         }
         int32_t channel_number = static_cast<int32_t>(std::stol(channel_number_str));
-        char* exp_start_time = slow5_hdr_get("exp_start_time", rec->read_group, core->fp->header);
-        if(!exp_start_time){
+        char *exp_start_time = slow5_hdr_get("exp_start_time", rec->read_group, core->fp->header);
+        if (!exp_start_time) {
             throw std::runtime_error("exp_start_time is missing");
         }
-
-        auto start_time_str = adjust_time(exp_start_time, static_cast<uint32_t>(start_time / rec->sampling_rate));
+        auto start_time_str = utils::adjust_time(exp_start_time,
+                                                 static_cast<uint32_t>(start_time / rec->sampling_rate));
 
 //    auto options = torch::TensorOptions().dtype(torch::kFloat32);
         auto options = torch::TensorOptions().dtype(torch::kInt16);
@@ -1007,19 +1028,19 @@ namespace dorado {
         slow5_rec_free(rec);
     }
 
-    void DataLoader::load_slow5_reads_from_file(const std::string& path){
-        slow5_file_t *sp = slow5_open(path.c_str(),"r");
-        if(sp==NULL){
-            fprintf(stderr,"Error in opening file\n");
+    void DataLoader::load_slow5_reads_from_file(const std::string &path) {
+        slow5_file_t *sp = slow5_open(path.c_str(), "r");
+        if (sp == NULL) {
+            fprintf(stderr, "Error in opening file\n");
             exit(EXIT_FAILURE);
         }
         int64_t batch_size = slow5_batchsize;
         int32_t num_threads = slow5_threads;
 
 
-        while(1){
+        while (1) {
             int flag_EOF = 0;
-            db_t db = { 0 };
+            db_t db = {0};
             db.mem_records = (char **) malloc(batch_size * sizeof *db.mem_records);
             db.mem_bytes = (size_t *) malloc(batch_size * sizeof *db.mem_bytes);
 
@@ -1045,54 +1066,59 @@ namespace dorado {
             // Setup multithreading structures
             core_t core;
             core.num_thread = (num_threads > record_count) ? record_count : num_threads;
-            if(record_count == 0){
+            if (record_count == 0) {
                 core.num_thread = 1;
             }
             core.fp = sp;
             core.m_device_ = m_device;
 
             db.n_batch = record_count;
-            db.read_data_ptrs = std::vector<std::shared_ptr<Read>> (record_count);
+            db.read_data_ptrs = std::vector<std::shared_ptr<Read>>(record_count);
 
-            work_db(&core,&db,create_read_data);
+            work_db(&core, &db, create_read_data);
 
             for (int64_t i = 0; i < record_count; i++) {
-                if (m_allowed_read_ids.size() == 0 ||
-                    (m_allowed_read_ids.find(db.read_data_ptrs[i]->read_id) != m_allowed_read_ids.end())) {
-                    m_read_sink.push_read(db.read_data_ptrs[i]);
+                if (!m_allowed_read_ids ||
+                    (m_allowed_read_ids->find(db.read_data_ptrs[i]->read_id) != m_allowed_read_ids->end())) {
+                    m_pipeline.push_message(std::move(db.read_data_ptrs[i]));
                     m_loaded_read_count++;
                 }
             }
+
+
 
             // Free everything
             free(db.mem_bytes);
             free(db.mem_records);
 
-            if(flag_EOF == 1){
+            if (flag_EOF == 1) {
                 break;
             }
         }
     }
 
 
-        DataLoader::DataLoader(Pipeline& pipeline,
-                           const std::string& device,
-                           size_t num_worker_threads,
-                           size_t max_reads,
-                           std::optional<std::unordered_set<std::string>> read_list,
-                           std::unordered_set<std::string> read_ignore_list)
-            : m_pipeline(pipeline),
-              m_device(device),
-              m_num_worker_threads(num_worker_threads),
-              m_allowed_read_ids(std::move(read_list)),
-              m_ignored_read_ids(std::move(read_ignore_list)) {
-            slow5_threads = slow5_threads_;
-            slow5_batchsize = slow5_batchsize_;
-            m_max_reads = max_reads == 0 ? std::numeric_limits<decltype(m_max_reads)>::max() : max_reads;
+    DataLoader::DataLoader(Pipeline & pipeline,
+    const std::string &device,
+    size_t num_worker_threads,
+    size_t max_reads,
+    std::optional<std::unordered_set<std::string>> read_list,
+    std::unordered_set<std::string> read_ignore_list,
+    int32_t slow5_threads_,
+    int64_t slow5_batchsize_)
+    : m_pipeline(pipeline),
+            m_device(device),
+            m_num_worker_threads(num_worker_threads),
+            m_allowed_read_ids(std::move(read_list)),
+            m_ignored_read_ids(std::move(read_ignore_list))
+    {
+        slow5_threads = slow5_threads_;
+        slow5_batchsize = slow5_batchsize_;
+        m_max_reads = max_reads == 0 ? std::numeric_limits<decltype(m_max_reads)>::max() : max_reads;
         assert(m_num_worker_threads > 0);
         static std::once_flag vbz_init_flag;
 #ifdef USE_FAST5
-            std::call_once(vbz_init_flag, vbz_register);
+        std::call_once(vbz_init_flag, vbz_register);
 #endif
     }
 
@@ -1100,5 +1126,4 @@ namespace dorado {
         return stats::NamedStats{{"loaded_read_count", static_cast<double>(m_loaded_read_count)}};
     }
 }  // namespace dorado
-
 #endif
