@@ -1,18 +1,15 @@
 #include "Version.h"
 #include "data_loader/DataLoader.h"
-#include "nn/CRFModel.h"
+#include "nn/CRFModelConfig.h"
 #include "nn/Runners.h"
 #include "read_pipeline/AlignerNode.h"
 #include "read_pipeline/BaseSpaceDuplexCallerNode.h"
-#include "read_pipeline/BasecallerNode.h"
-#include "read_pipeline/DuplexSplitNode.h"
+#include "read_pipeline/DuplexReadTaggingNode.h"
 #include "read_pipeline/HtsWriter.h"
-#include "read_pipeline/PairingNode.h"
+#include "read_pipeline/Pipelines.h"
 #include "read_pipeline/ProgressTracker.h"
 #include "read_pipeline/ReadFilterNode.h"
 #include "read_pipeline/ReadToBamTypeNode.h"
-#include "read_pipeline/ScalerNode.h"
-#include "read_pipeline/StereoDuplexEncoderNode.h"
 #include "utils/bam_utils.h"
 #include "utils/cli_utils.h"
 #include "utils/duplex_utils.h"
@@ -81,7 +78,10 @@ int duplex(int argc, char* argv[]) {
                   "reads will be basecalled")
             .default_value(std::string(""));
 
-    parser.add_argument("--min-qscore").default_value(0).scan<'i', int>();
+    parser.add_argument("--min-qscore")
+            .help("Discard reads with mean Q-score below this threshold.")
+            .default_value(0)
+            .scan<'i', int>();
 
     parser.add_argument("--reference")
             .help("Path to reference for alignment.")
@@ -99,13 +99,6 @@ int duplex(int argc, char* argv[]) {
     parser.add_argument("-v", "--verbose").default_value(false).implicit_value(true);
 
     parser.add_argument("-I").help("minimap2 index batch size.").default_value(std::string("16G"));
-
-    parser.add_argument("--guard-gpus")
-            .default_value(false)
-            .implicit_value(true)
-            .help("In case of GPU OOM, use this option to be more defensive with GPU memory. May "
-                  "cause "
-                  "performance regression.");
 
     try {
         auto remaining_args = parser.parse_known_args(argc, argv);
@@ -190,10 +183,11 @@ int duplex(int argc, char* argv[]) {
         }
         auto read_converter =
                 pipeline_desc.add_node<ReadToBamType>({converted_reads_sink}, emit_moves, rna, 2);
+        auto duplex_read_tagger = pipeline_desc.add_node<DuplexReadTaggingNode>({read_converter});
         // The minimum sequence length is set to 5 to avoid issues with duplex node printing very short sequences for mismatched pairs.
         std::unordered_set<std::string> read_ids_to_filter;
         auto read_filter_node = pipeline_desc.add_node<ReadFilterNode>(
-                {read_converter}, min_qscore, default_parameters.min_sequence_length,
+                {duplex_read_tagger}, min_qscore, default_parameters.min_sequence_length,
                 read_ids_to_filter, 5);
 
         torch::set_num_threads(1);
@@ -242,8 +236,19 @@ int duplex(int argc, char* argv[]) {
             model = model_path.filename().string();
             auto model_config = load_crf_model_config(model_path);
 
+            if (!DataLoader::is_read_data_present(reads, recursive_file_loading)) {
+                std::string err = "No S/BLOW5 data found in path: " + reads;
+                throw std::runtime_error(err);
+            }
+
+            // Check sample rate of model vs data.
             auto data_sample_rate = DataLoader::get_sample_rate(reads, recursive_file_loading);
-            auto model_sample_rate = get_model_sample_rate(model_path);
+            auto model_sample_rate = model_config.sample_rate;
+            if (model_sample_rate < 0) {
+                // If unsuccessful, find sample rate by model name.
+                model_sample_rate = utils::get_sample_rate_by_model_name(
+                        utils::extract_model_from_model_path(model_path.string()));
+            }
             auto skip_model_compatibility_check =
                     internal_parser.get<bool>("--skip-model-compatibility-check");
             if (!skip_model_compatibility_check &&
@@ -287,7 +292,7 @@ int duplex(int argc, char* argv[]) {
             // performed based on empirical results considering a SUP model for simplex
             // calling.
             auto [runners, num_devices] = create_basecall_runners(
-                    model_config, device, num_runners, batch_size, chunk_size, 0.9f, true);
+                    model_config, device, num_runners, 0, batch_size, chunk_size, 0.9f, true);
 
             std::vector<Runner> stereo_runners;
             // The fraction argument for GPU memory allocates the fraction of the
@@ -295,52 +300,35 @@ int duplex(int argc, char* argv[]) {
             // memory after simplex caller has been instantiated to the duplex caller.
             // ALWAYS auto tune the duplex batch size (i.e. batch_size passed in is 0.)
             // except for on metal
+            // WORKAROUND: As a workaround to CUDA OOM, force stereo to have a smaller
+            // memory footprint for both model and decode function. This will increase the
+            // chances for the stereo model to use the cached allocations from the simplex
+            // model.
             std::tie(stereo_runners, std::ignore) =
-                    create_basecall_runners(stereo_model_config, device, num_runners,
-                                            stereo_batch_size, chunk_size, 1.f, true);
+                    create_basecall_runners(stereo_model_config, device, num_runners, 0,
+                                            stereo_batch_size, chunk_size, 0.5f, true);
 
             spdlog::info("> Starting Stereo Duplex pipeline");
 
-            auto stereo_model_stride = stereo_runners.front()->model_stride();
+            PairingParameters pairing_parameters;
+            if (template_complement_map.empty()) {
+                pairing_parameters = ReadOrder::BY_CHANNEL;
+            } else {
+                pairing_parameters = std::move(template_complement_map);
+            }
 
-            auto adjusted_stereo_overlap = (overlap / stereo_model_stride) * stereo_model_stride;
-
-            const int kStereoBatchTimeoutMS = 5000;
-            auto stereo_basecaller_node = pipeline_desc.add_node<BasecallerNode>(
-                    {read_filter_node}, std::move(stereo_runners), adjusted_stereo_overlap,
-                    kStereoBatchTimeoutMS, duplex_rg_name, 1000, "StereoBasecallerNode", true,
-                    get_model_mean_qscore_start_pos(stereo_model_config));
-            auto simplex_model_stride = runners.front()->model_stride();
-
-            auto stereo_node = pipeline_desc.add_node<StereoDuplexEncoderNode>(
-                    {stereo_basecaller_node}, simplex_model_stride);
-
-            auto pairing_node =
-                    template_complement_map.empty()
-                            ? pipeline_desc.add_node<PairingNode>({stereo_node},
-                                                                  ReadOrder::BY_CHANNEL)
-                            : pipeline_desc.add_node<PairingNode>(
-                                      {stereo_node}, std::move(template_complement_map));
-
-            // Initialize duplex split settings and create a duplex split node
-            // with the given settings and number of devices. If
-            // splitter_settings.enabled is set to false, the splitter node will
-            // act as a passthrough, meaning it won't perform any splitting
-            // operations and will just pass data through.
-            DuplexSplitSettings splitter_settings;
-            auto splitter_node = pipeline_desc.add_node<DuplexSplitNode>(
-                    {pairing_node}, splitter_settings, num_devices);
-
-            auto adjusted_simplex_overlap = (overlap / simplex_model_stride) * simplex_model_stride;
-
-            const int kSimplexBatchTimeoutMS = 100;
-            auto basecaller_node = pipeline_desc.add_node<BasecallerNode>(
-                    {splitter_node}, std::move(runners), adjusted_simplex_overlap,
-                    kSimplexBatchTimeoutMS, model, 1000, "BasecallerNode", true,
-                    get_model_mean_qscore_start_pos(model_config));
-
-            auto scaler_node = pipeline_desc.add_node<ScalerNode>(
-                    {basecaller_node}, model_config.signal_norm_params, num_devices * 2);
+            auto mean_qscore_start_pos = model_config.mean_qscore_start_pos;
+            if (mean_qscore_start_pos < 0) {
+                mean_qscore_start_pos =
+                        utils::get_mean_qscore_start_pos_by_model_name(stereo_model_name);
+                if (mean_qscore_start_pos < 0) {
+                    throw std::runtime_error("Mean q-score start position cannot be < 0");
+                }
+            }
+            pipelines::create_stereo_duplex_pipeline(
+                    pipeline_desc, std::move(runners), std::move(stereo_runners), overlap,
+                    mean_qscore_start_pos, num_devices * 2, num_devices,
+                    std::move(pairing_parameters), read_filter_node);
 
             std::vector<dorado::stats::StatsReporter> stats_reporters;
             pipeline = Pipeline::create(std::move(pipeline_desc), &stats_reporters);
@@ -369,7 +357,7 @@ int duplex(int argc, char* argv[]) {
 
         // Wait for the pipeline to complete.  When it does, we collect
         // final stats to allow accurate summarisation.
-        final_stats = pipeline->terminate();
+        final_stats = pipeline->terminate(DefaultFlushOptions());
 
         // Stop the stats sampler thread before tearing down any pipeline objects.
         stats_sampler->terminate();

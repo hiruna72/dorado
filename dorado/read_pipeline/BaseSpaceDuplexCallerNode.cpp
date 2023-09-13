@@ -165,6 +165,7 @@ void BaseSpaceDuplexCallerNode::basespace(const std::string& template_read_id,
                 complement_sequence_reverse_complement, result.alignment);
 
         auto duplex_read = std::make_shared<Read>();
+        duplex_read->is_duplex = true;
         duplex_read->seq = std::string(consensus.begin(), consensus.end());
         duplex_read->qstring =
                 std::string(quality_scores_phred.begin(), quality_scores_phred.end());
@@ -172,7 +173,7 @@ void BaseSpaceDuplexCallerNode::basespace(const std::string& template_read_id,
         duplex_read->read_id = template_read->read_id + ";" + complement_read->read_id;
         duplex_read->read_tag = template_read->read_tag;
 
-        send_message_to_sink(duplex_read);
+        send_message_to_sink(std::move(duplex_read));
     }
     edlibFreeAlignResult(result);
 }
@@ -185,15 +186,25 @@ BaseSpaceDuplexCallerNode::BaseSpaceDuplexCallerNode(
           m_template_complement_map(std::move(template_complement_map)),
           m_reads(std::move(reads)),
           m_num_worker_threads(threads) {
+    start_threads();
+}
+
+void BaseSpaceDuplexCallerNode::start_threads() {
     m_worker_thread =
             std::make_unique<std::thread>(&BaseSpaceDuplexCallerNode::worker_thread, this);
 }
 
 void BaseSpaceDuplexCallerNode::terminate_impl() {
     terminate_input_queue();
-    if (m_worker_thread->joinable()) {
+    if (m_worker_thread && m_worker_thread->joinable()) {
         m_worker_thread->join();
     }
+    m_worker_thread.reset();
+}
+
+void BaseSpaceDuplexCallerNode::restart() {
+    restart_input_queue();
+    start_threads();
 }
 
 }  // namespace dorado

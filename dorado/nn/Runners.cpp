@@ -1,6 +1,10 @@
 #include "Runners.h"
 
+#include "ModBaseRunner.h"
+#include "ModelRunner.h"
+#include "cxxpool.h"
 #include "decode/CPUDecoder.h"
+#include "nn/CRFModel.h"
 
 #if DORADO_GPU_BUILD
 #ifdef __APPLE__
@@ -18,7 +22,8 @@ namespace dorado {
 std::pair<std::vector<dorado::Runner>, size_t> create_basecall_runners(
         const dorado::CRFModelConfig& model_config,
         const std::string& device,
-        size_t num_runners,
+        size_t num_gpu_runners,
+        size_t num_cpu_runners,
         size_t batch_size,
         size_t chunk_size,
         float memory_fraction,
@@ -26,17 +31,19 @@ std::pair<std::vector<dorado::Runner>, size_t> create_basecall_runners(
     std::vector<dorado::Runner> runners;
 
     // Default is 1 device.  CUDA path may alter this.
-    int num_devices = 1;
+    size_t num_devices = 1;
 
     if (device == "cpu") {
-        num_runners = std::thread::hardware_concurrency();
         if (batch_size == 0) {
             batch_size = 128;
         }
-        spdlog::debug("- CPU calling: set batch size to {}, num_runners to {}", batch_size,
-                      num_runners);
+        if (num_cpu_runners == 0) {
+            num_cpu_runners = auto_calculate_num_runners(model_config, batch_size, memory_fraction);
+        }
+        spdlog::debug("- CPU calling: set batch size to {}, num_cpu_runners to {}", batch_size,
+                      num_cpu_runners);
 
-        for (size_t i = 0; i < num_runners; i++) {
+        for (size_t i = 0; i < num_cpu_runners; i++) {
             runners.push_back(std::make_shared<dorado::ModelRunner<dorado::CPUDecoder>>(
                     model_config, device, chunk_size, batch_size));
         }
@@ -45,7 +52,7 @@ std::pair<std::vector<dorado::Runner>, size_t> create_basecall_runners(
 #ifdef __APPLE__
     else if (device == "metal") {
         auto caller = dorado::create_metal_caller(model_config, chunk_size, batch_size);
-        for (size_t i = 0; i < num_runners; i++) {
+        for (size_t i = 0; i < num_gpu_runners; i++) {
             runners.push_back(std::make_shared<dorado::MetalModelRunner>(caller));
         }
         if (runners.back()->batch_size() != batch_size) {
@@ -61,14 +68,26 @@ std::pair<std::vector<dorado::Runner>, size_t> create_basecall_runners(
         if (num_devices == 0) {
             throw std::runtime_error("CUDA device requested but no devices found.");
         }
+
+        cxxpool::thread_pool pool{num_devices};
+        std::vector<std::shared_ptr<CudaCaller>> callers;
+        std::vector<std::future<std::shared_ptr<dorado::CudaCaller>>> futures;
+
         for (auto device_string : devices) {
-            auto caller = dorado::create_cuda_caller(model_config, chunk_size, batch_size,
-                                                     device_string, memory_fraction, guard_gpus);
-            for (size_t i = 0; i < num_runners; i++) {
-                runners.push_back(std::make_shared<dorado::CudaModelRunner>(caller));
+            futures.push_back(pool.push(dorado::create_cuda_caller, model_config, chunk_size,
+                                        batch_size, device_string, memory_fraction, guard_gpus));
+        }
+
+        for (auto& caller : futures) {
+            callers.push_back(caller.get());
+        }
+
+        for (size_t j = 0; j < num_devices; j++) {
+            for (size_t i = 0; i < num_gpu_runners; i++) {
+                runners.push_back(std::make_shared<dorado::CudaModelRunner>(callers[j]));
             }
             if (runners.back()->batch_size() != batch_size) {
-                spdlog::debug("- set batch size for {} to {}", device_string,
+                spdlog::debug("- set batch size for {} to {}", devices[j],
                               runners.back()->batch_size());
             }
         }
@@ -111,19 +130,32 @@ std::vector<std::unique_ptr<dorado::ModBaseRunner>> create_modbase_runners(
     // generate model callers before nodes or it affects the speed calculations
     std::vector<std::unique_ptr<dorado::ModBaseRunner>> remora_runners;
     std::vector<std::string> modbase_devices;
-#if DORADO_GPU_BUILD && !defined(__APPLE__)
-    if (device != "cpu") {
-        modbase_devices = dorado::utils::parse_cuda_device_string(device);
-    } else
-#endif
-    {
+
+    int remora_callers = 1;
+    if (device == "cpu") {
+        modbase_devices.push_back(device);
+        remora_batch_size = 128;
+        remora_runners_per_caller = 1;
+        remora_callers = std::thread::hardware_concurrency();
+    }
+#if DORADO_GPU_BUILD
+#ifdef __APPLE__
+    else if (device == "metal") {
         modbase_devices.push_back(device);
     }
+#else   // ifdef __APPLE__
+    else {
+        modbase_devices = dorado::utils::parse_cuda_device_string(device);
+    }
+#endif  // __APPLE__
+#endif  // DORADO_GPU_BUILD
     for (const auto& device_string : modbase_devices) {
-        auto caller =
-                dorado::create_modbase_caller(remora_model_list, remora_batch_size, device_string);
-        for (size_t i = 0; i < remora_runners_per_caller; i++) {
-            remora_runners.push_back(std::make_unique<dorado::ModBaseRunner>(caller));
+        for (int i = 0; i < remora_callers; ++i) {
+            auto caller = dorado::create_modbase_caller(remora_model_list, remora_batch_size,
+                                                        device_string);
+            for (size_t i = 0; i < remora_runners_per_caller; i++) {
+                remora_runners.push_back(std::make_unique<dorado::ModBaseRunner>(caller));
+            }
         }
     };
 

@@ -23,22 +23,16 @@
  *  be "CXT:XG:_:_". 
  */
 
+namespace dorado {
+struct ModBaseModelConfig;
+}  // namespace dorado
+
 namespace dorado::utils {
 
-struct BaseModInfo {
-    BaseModInfo(std::string alphabet_, std::string long_names_, std::string context_)
-            : alphabet(std::move(alphabet_)),
-              long_names(std::move(long_names_)),
-              context(std::move(context_)) {}
-    std::string alphabet;
-    std::string long_names;
-    std::string context;
-};
-
-class BaseModContext {
+class ModBaseContext {
 public:
     /// Constructor.
-    BaseModContext();
+    ModBaseContext();
 
     /// Get the context set for the specified base (if any).
     const std::string& motif(char base) const;

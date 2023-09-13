@@ -12,6 +12,7 @@
 
 namespace dorado {
 
+struct CRFModelConfig;
 class CudaCaller;
 
 std::shared_ptr<CudaCaller> create_cuda_caller(const CRFModelConfig& model_config,
@@ -26,10 +27,12 @@ public:
     explicit CudaModelRunner(std::shared_ptr<CudaCaller> caller);
     void accept_chunk(int chunk_idx, const torch::Tensor& chunk) final;
     std::vector<DecodedChunk> call_chunks(int num_chunks) final;
+    const CRFModelConfig& config() const final;
     size_t model_stride() const final;
     size_t chunk_size() const final;
     size_t batch_size() const final;
     void terminate() final;
+    void restart() final;
     std::string get_name() const final;
     stats::NamedStats sample_stats() const final;
 

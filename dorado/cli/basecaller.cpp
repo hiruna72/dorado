@@ -1,19 +1,16 @@
 #include "Version.h"
 #include "data_loader/DataLoader.h"
-#include "nn/CRFModel.h"
+#include "nn/CRFModelConfig.h"
 #include "nn/ModBaseRunner.h"
-#include "nn/ModelRunner.h"
 #include "nn/Runners.h"
 #include "read_pipeline/AlignerNode.h"
-#include "read_pipeline/BasecallerNode.h"
 #include "read_pipeline/HtsReader.h"
 #include "read_pipeline/HtsWriter.h"
-#include "read_pipeline/ModBaseCallerNode.h"
+#include "read_pipeline/Pipelines.h"
 #include "read_pipeline/ProgressTracker.h"
 #include "read_pipeline/ReadFilterNode.h"
 #include "read_pipeline/ReadToBamTypeNode.h"
 #include "read_pipeline/ResumeLoaderNode.h"
-#include "read_pipeline/ScalerNode.h"
 #include "utils/bam_utils.h"
 #include "utils/basecaller_utils.h"
 #include "utils/cli_utils.h"
@@ -68,43 +65,23 @@ void setup(std::vector<std::string> args,
            const std::string& dump_stats_filter,
            const std::string& resume_from_file,
            argparse::ArgumentParser& resume_parser) {
+    auto model_config = load_crf_model_config(model_path);
+    std::string model_name = utils::extract_model_from_model_path(model_path.string());
+
     torch::set_num_threads(1);
 
-    // create modbase runners first so basecall runners can pick batch sizes based on available memory
-    auto remora_runners = create_modbase_runners(
-            remora_models, device, default_parameters.remora_runners_per_caller, remora_batch_size);
-
-    auto model_config = dorado::load_crf_model_config(model_path);
-    auto [runners, num_devices] =
-            create_basecall_runners(model_config, device, num_runners, batch_size, chunk_size);
-
-    // verify that all runners are using the same stride, in case we allow multiple models in future
-    auto model_stride = runners.front()->model_stride();
-    auto adjusted_chunk_size = runners.front()->chunk_size();
-    auto adjusted_overlap = (overlap / model_stride) * model_stride;
-
-    if (overlap != adjusted_overlap) {
-        spdlog::debug("- adjusted overlap to match model stride: {} -> {}", overlap,
-                      adjusted_overlap);
-        overlap = adjusted_overlap;
+    if (!DataLoader::is_read_data_present(data_path, recursive_file_loading)) {
+        std::string err = "No S/BLOW5 data found in path: " + data_path;
+        throw std::runtime_error(err);
     }
-
-    if (!remora_runners.empty() && output_mode == HtsWriter::OutputMode::FASTQ) {
-        throw std::runtime_error("Modified base models cannot be used with FASTQ output");
-    }
-
-    if (!ref.empty() && output_mode == HtsWriter::OutputMode::FASTQ) {
-        throw std::runtime_error("Alignment to reference cannot be used with FASTQ output.");
-    }
-
-    std::string model_name = std::filesystem::canonical(model_path).filename().string();
-    auto read_groups = DataLoader::load_read_groups(data_path, model_name, recursive_file_loading);
-
-    auto read_list = utils::load_read_list(read_list_file_path);
 
     // Check sample rate of model vs data.
     auto data_sample_rate = DataLoader::get_sample_rate(data_path, recursive_file_loading);
-    auto model_sample_rate = get_model_sample_rate(model_path);
+    auto model_sample_rate = model_config.sample_rate;
+    if (model_sample_rate < 0) {
+        // If unsuccessful, find sample rate by model name.
+        model_sample_rate = utils::get_sample_rate_by_model_name(model_name);
+    }
     if (!skip_model_compatibility_check &&
         !sample_rates_compatible(data_sample_rate, model_sample_rate)) {
         std::stringstream err;
@@ -112,6 +89,24 @@ void setup(std::vector<std::string> args,
             << ") are not compatible.";
         throw std::runtime_error(err.str());
     }
+
+    if (!ref.empty() && output_mode == HtsWriter::OutputMode::FASTQ) {
+        throw std::runtime_error("Alignment to reference cannot be used with FASTQ output.");
+    }
+
+    // create modbase runners first so basecall runners can pick batch sizes based on available memory
+    auto remora_runners = create_modbase_runners(
+            remora_models, device, default_parameters.remora_runners_per_caller, remora_batch_size);
+
+    if (!remora_runners.empty() && output_mode == HtsWriter::OutputMode::FASTQ) {
+        throw std::runtime_error("Modified base models cannot be used with FASTQ output");
+    }
+
+    auto [runners, num_devices] =
+            create_basecall_runners(model_config, device, num_runners, 0, batch_size, chunk_size);
+
+    auto read_groups = DataLoader::load_read_groups(data_path, model_name, recursive_file_loading);
+    auto read_list = utils::load_read_list(read_list_file_path);
 
     size_t num_reads = DataLoader::get_num_reads(
             data_path, read_list, {} /*reads_already_processed*/, recursive_file_loading);
@@ -127,18 +122,14 @@ void setup(std::vector<std::string> args,
     utils::add_rg_hdr(hdr.get(), read_groups);
 
     PipelineDescriptor pipeline_desc;
-    auto hts_writer = PipelineDescriptor::InvalidNodeHandle;
+    auto hts_writer = pipeline_desc.add_node<HtsWriter>(
+            {}, "-", output_mode, thread_allocations.writer_threads, num_reads);
     auto aligner = PipelineDescriptor::InvalidNodeHandle;
     auto converted_reads_sink = PipelineDescriptor::InvalidNodeHandle;
     std::unordered_set<std::string> reads_already_processed;
-    // TODO -- refactor to avoid repeated code here.
     if (ref.empty()) {
-        hts_writer = pipeline_desc.add_node<HtsWriter>(
-                {}, "-", output_mode, thread_allocations.writer_threads, num_reads);
         converted_reads_sink = hts_writer;
     } else {
-        hts_writer = pipeline_desc.add_node<HtsWriter>(
-                {}, "-", output_mode, thread_allocations.writer_threads, num_reads);
         aligner = pipeline_desc.add_node<Aligner>({hts_writer}, ref, kmer_size, window_size,
                                                   mm2_index_batch_size,
                                                   thread_allocations.aligner_threads);
@@ -151,22 +142,17 @@ void setup(std::vector<std::string> args,
             {read_converter}, min_qscore, default_parameters.min_sequence_length,
             std::unordered_set<std::string>{}, thread_allocations.read_filter_threads);
 
-    auto basecaller_node_sink = read_filter_node;
-
-    if (!remora_runners.empty()) {
-        auto mod_base_caller_node = pipeline_desc.add_node<ModBaseCallerNode>(
-                {read_filter_node}, std::move(remora_runners),
-                thread_allocations.remora_threads * num_devices, model_stride, remora_batch_size);
-        basecaller_node_sink = mod_base_caller_node;
+    auto mean_qscore_start_pos = model_config.mean_qscore_start_pos;
+    if (mean_qscore_start_pos < 0) {
+        mean_qscore_start_pos = utils::get_mean_qscore_start_pos_by_model_name(model_name);
+        if (mean_qscore_start_pos < 0) {
+            throw std::runtime_error("Mean q-score start position cannot be < 0");
+        }
     }
-    const int kBatchTimeoutMS = 100;
-    auto basecaller_node = pipeline_desc.add_node<BasecallerNode>(
-            {basecaller_node_sink}, std::move(runners), overlap, kBatchTimeoutMS, model_name, 1000,
-            "BasecallerNode", false, get_model_mean_qscore_start_pos(model_config));
-
-    auto scaler_node =
-            pipeline_desc.add_node<ScalerNode>({basecaller_node}, model_config.signal_norm_params,
-                                               thread_allocations.scaler_node_threads);
+    pipelines::create_simplex_pipeline(
+            pipeline_desc, std::move(runners), std::move(remora_runners), overlap,
+            mean_qscore_start_pos, thread_allocations.scaler_node_threads,
+            thread_allocations.remora_threads * num_devices, read_filter_node);
 
     // Create the Pipeline from our description.
     std::vector<dorado::stats::StatsReporter> stats_reporters;
@@ -227,7 +213,7 @@ void setup(std::vector<std::string> args,
 
     // Wait for the pipeline to complete.  When it does, we collect
     // final stats to allow accurate summarisation.
-    auto final_stats = pipeline->terminate();
+    auto final_stats = pipeline->terminate(DefaultFlushOptions());
 
     // Stop the stats sampler thread before tearing down any pipeline objects.
     stats_sampler->terminate();
@@ -273,7 +259,10 @@ int basecaller(int argc, char* argv[]) {
 
     parser.add_argument("-n", "--max-reads").default_value(0).scan<'i', int>();
 
-    parser.add_argument("--min-qscore").default_value(0).scan<'i', int>();
+    parser.add_argument("--min-qscore")
+            .help("Discard reads with mean Q-score below this threshold.")
+            .default_value(0)
+            .scan<'i', int>();
 
     parser.add_argument("-b", "--batchsize")
             .default_value(default_parameters.batchsize)

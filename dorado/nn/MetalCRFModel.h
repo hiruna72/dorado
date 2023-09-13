@@ -12,6 +12,7 @@
 
 namespace dorado {
 
+struct CRFModelConfig;
 class MetalCaller;
 
 std::shared_ptr<MetalCaller> create_metal_caller(const CRFModelConfig& model_config,
@@ -23,10 +24,12 @@ public:
     explicit MetalModelRunner(std::shared_ptr<MetalCaller> caller);
     void accept_chunk(int chunk_idx, const torch::Tensor& chunk) final;
     std::vector<DecodedChunk> call_chunks(int num_chunks) final;
+    const CRFModelConfig& config() const final;
     size_t model_stride() const final;
     size_t chunk_size() const final;
     size_t batch_size() const final;
     void terminate() final;
+    void restart() final;
     std::string get_name() const final { return "MetalModelRunner"; }
     stats::NamedStats sample_stats() const final;
 
