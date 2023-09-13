@@ -292,7 +292,7 @@ int basecaller(int argc, char* argv[]) {
     parser.add_argument("-r", "--recursive")
             .default_value(false)
             .implicit_value(true)
-            .help("Recursively scan through directories to load FAST5 and POD5 files");
+            .help("Recursively scan through directories to load S/BLOW5 files");
 
     parser.add_argument("--slow5_threads")
             .default_value(default_parameters.slow5_threads)
