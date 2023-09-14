@@ -70,6 +70,7 @@ private:
                                                    const std::vector<ReadID>& read_ids);
 #endif
     void load_slow5_reads_from_file(const std::string& path);
+    void load_slow5_reads_from_file_by_read_ids(const std::string& path, const std::vector<ReadID>& read_ids);
     void load_read_channels(std::string data_path, bool recursive_file_loading = false);
     Pipeline& m_pipeline;  // Where should the loaded reads go?
     std::atomic<size_t> m_loaded_read_count{0};

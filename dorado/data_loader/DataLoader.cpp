@@ -811,19 +811,99 @@ namespace dorado {
             spdlog::error("Requested input path {} does not exist!", path);
             return;
         }
-        if (!std::filesystem::is_directory(path)) {
-            std::string ext = std::filesystem::path(path).extension().string();
-            std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return std::tolower(c); });
-            if (ext == ".slow5" || ext == ".blow5") {
-                load_slow5_reads_from_file(path);
+
+        auto iterate_directory = [&](const auto& iterator_fn) {
+            switch (traversal_order) {
+            case ReadOrder::BY_CHANNEL:
+                // If traversal in channel order is required, the following algorithm
+                // is used -
+                // 1. iterate through all the read metadata to collect channel information
+                // across all pod5 files
+                // 2. store the read list sorted by channel number
+                spdlog::info("> Reading read channel info");
+                load_read_channels(path, recursive_file_loading);
+                spdlog::info("> Processed read channel info");
+                // 3. for each channel, iterate through all files and in each iteration
+                // only load the reads that correspond to that channel.
+                for (int channel = 0; channel <= m_max_channel; channel++) {
+                    for (const auto& entry : iterator_fn(path)) {
+                        if (m_loaded_read_count == m_max_reads) {
+                            break;
+                        }
+                        auto path = std::filesystem::path(entry);
+                        std::string ext = path.extension().string();
+                        std::transform(ext.begin(), ext.end(), ext.begin(),
+                                       [](unsigned char c) { return std::tolower(c); });
+                        if (ext == ".slow5" || ext == ".blow5") {
+                            auto& channel_to_read_ids = m_file_channel_read_order_map.at(path.string());
+                            auto& read_ids = channel_to_read_ids[channel];
+                            if (!read_ids.empty()) {
+                                load_slow5_reads_from_file_by_read_ids(entry.path().string(), read_ids);
+                            }
+                        }
+                    }
+                }
+                break;
+            case ReadOrder::UNRESTRICTED:
+                for (const auto& entry : iterator_fn(path)) {
+                    if (m_loaded_read_count == m_max_reads) {
+                        break;
+                    }
+                    std::string ext = std::filesystem::path(entry).extension().string();
+                    std::transform(ext.begin(), ext.end(), ext.begin(),
+                                   [](unsigned char c) { return std::tolower(c); });
+                    if (ext == ".slow5" || ext == ".blow5") {
+                        load_slow5_reads_from_file(entry.path().string());
+                    }
+                }
+                break;
+            default:
+                throw std::runtime_error("Unsupported traversal order detected: " +
+                                         dorado::to_string(traversal_order));
             }
+        };
+
+        if (recursive_file_loading) {
+            iterate_directory([](const auto& path) {
+                return std::filesystem::recursive_directory_iterator(path);
+            });
         } else {
-            for (const auto &entry: std::filesystem::directory_iterator(path)) {
-                std::string ext = std::filesystem::path(entry).extension().string();
+            if (!std::filesystem::is_directory(path)) {
+                std::string ext = std::filesystem::path(path).extension().string();
                 std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return std::tolower(c); });
                 if (ext == ".slow5" || ext == ".blow5") {
-                    load_slow5_reads_from_file(entry.path().string());
+                    switch (traversal_order) {
+                    case ReadOrder::BY_CHANNEL:
+                        spdlog::info("> Reading read channel info");
+                        load_read_channels(path, recursive_file_loading);
+                        spdlog::info("> Processed read channel info");
+                        // 3. for each channel, iterate through all files and in each iteration
+                        // only load the reads that correspond to that channel.
+                        for (int channel = 0; channel <= m_max_channel; channel++) {
+                            if (m_loaded_read_count == m_max_reads) {
+                                break;
+                            }
+                            auto& channel_to_read_ids = m_file_channel_read_order_map.at(path);
+                            auto& read_ids = channel_to_read_ids[channel];
+                            if (!read_ids.empty()) {
+                                load_slow5_reads_from_file_by_read_ids(path, read_ids);
+                            }
+                        }
+                        break;
+                    case ReadOrder::UNRESTRICTED:
+                        if (m_loaded_read_count == m_max_reads) {
+                            break;
+                        }
+                        load_slow5_reads_from_file(path);
+                        break;
+                    default:
+                        throw std::runtime_error("Unsupported traversal order detected: " +
+                                                 dorado::to_string(traversal_order));
+                    }
                 }
+            }else{
+                iterate_directory(
+                        [](const auto &path) { return std::filesystem::directory_iterator(path); });
             }
         }
     }
@@ -839,6 +919,26 @@ namespace dorado {
                 std::string ext = std::filesystem::path(entry).extension().string();
                 std::transform(ext.begin(), ext.end(), ext.begin(),
                                [](unsigned char c) { return std::tolower(c); });
+                auto file_path = entry.path().string();
+                if (ext != ".slow5" and ext != ".blow5") {
+                    continue;
+                }
+                slow5_file_t *sp = slow5_open(file_path.c_str(),"r");
+                if(sp==NULL){
+                    fprintf(stderr,"Error in opening file\n");
+                    exit(EXIT_FAILURE);
+                }
+                size_t bytes;
+                char *mem;
+                while ((mem = (char *) slow5_get_next_mem(&bytes, sp))) {
+                    free(mem);
+                    num_reads++;
+                }
+                if (slow5_errno != SLOW5_ERR_EOF) {
+                    fprintf(stderr,"Error reading the file.%s","");
+                    exit(EXIT_FAILURE);
+                }
+                slow5_close(sp);
             }
         };
 
@@ -847,8 +947,30 @@ namespace dorado {
                 return std::filesystem::recursive_directory_iterator(path);
             });
         } else {
-            iterate_directory(
-                    [](const auto &path) { return std::filesystem::directory_iterator(path); });
+            if(!std::filesystem::is_directory(data_path)) {
+                std::string ext = std::filesystem::path(data_path).extension().string();
+                std::transform(ext.begin(), ext.end(), ext.begin(),
+                               [](unsigned char c) { return std::tolower(c); });
+                slow5_file_t *sp = slow5_open(data_path.c_str(),"r");
+                if(sp==NULL){
+                    fprintf(stderr,"Error in opening file\n");
+                    exit(EXIT_FAILURE);
+                }
+                size_t bytes;
+                char *mem;
+                while ((mem = (char *) slow5_get_next_mem(&bytes, sp))) {
+                    free(mem);
+                    num_reads++;
+                }
+                if (slow5_errno != SLOW5_ERR_EOF) {
+                    fprintf(stderr,"Error reading the file.%s","");
+                    exit(EXIT_FAILURE);
+                }
+                slow5_close(sp);
+            }else{
+                iterate_directory(
+                        [](const auto &path) { return std::filesystem::directory_iterator(path); });
+            }
         }
 
         // Remove the reads in the ignore list from the total dataset read count.
@@ -869,29 +991,48 @@ namespace dorado {
 
     void DataLoader::load_read_channels(std::string data_path, bool recursive_file_loading) {
         auto iterate_directory = [&](const auto &iterator_fn) {
-        };
-
-        if (recursive_file_loading) {
-            iterate_directory([](const auto &path) {
-                return std::filesystem::recursive_directory_iterator(path);
-            });
-        } else {
-            iterate_directory(
-                    [](const auto &path) { return std::filesystem::directory_iterator(path); });
-        }
-    }
-
-    std::unordered_map<std::string, ReadGroup> DataLoader::load_read_groups(
-            std::string data_path,
-            std::string model_path,
-            bool recursive_file_loading) {
-        std::unordered_map<std::string, ReadGroup> read_groups;
-
-        auto iterate_directory = [&](const auto &iterator_fn) {
-            for (const auto &entry: iterator_fn(data_path)) {
-                std::string ext = std::filesystem::path(entry).extension().string();
+            for (const auto& entry : iterator_fn(data_path)) {
+                auto file_path = std::filesystem::path(entry);
+                std::string ext = file_path.extension().string();
                 std::transform(ext.begin(), ext.end(), ext.begin(),
                                [](unsigned char c) { return std::tolower(c); });
+                if (ext != ".blow5" and ext != ".slow5") {
+                    continue;
+                }
+                // Use a std::map to store by sorted channel order.
+                m_file_channel_read_order_map.emplace(data_path, channel_to_read_id_t());
+                auto& channel_to_read_id = m_file_channel_read_order_map[data_path];
+
+                slow5_file_t *sp = slow5_open(file_path.c_str(),"r");
+                if(sp==NULL){
+                    fprintf(stderr,"Error in opening file\n");
+                    exit(EXIT_FAILURE);
+                }
+                slow5_rec_t *rec = NULL;
+                int ret=0;
+                std::optional<uint16_t> sample_rate_local = std::nullopt;
+                while((ret = slow5_get_next(&rec,sp)) >= 0){
+                    uint64_t len; //length of the array
+                    char* channel_number = slow5_aux_get_string(rec, "channel_number", &len, &ret);
+                    if(ret!=0){
+                        fprintf(stderr,"Error in getting auxiliary attribute from the file. Error code %d\n",ret);
+                        exit(EXIT_FAILURE);
+                    }
+                    if (channel_number == NULL){ //check if the field value exists and print the value
+                        fprintf(stderr,"channel_number is missing for the record %s\n", rec->read_id);
+                        exit(EXIT_FAILURE);
+                    } else{
+                        int channel = atoi(channel_number);
+                        // Update maximum number of channels encountered.
+                        m_max_channel = std::max(m_max_channel, channel);
+                        // Store the read_id in the channel's list.
+                        ReadID read_id;
+                        std::memcpy(read_id.data(), rec->read_id, POD5_READ_ID_SIZE);
+                        channel_to_read_id[channel].push_back(std::move(read_id));
+                    }
+                }
+                slow5_rec_free(rec);
+                slow5_close(sp);
             }
         };
 
@@ -900,10 +1041,184 @@ namespace dorado {
                 return std::filesystem::recursive_directory_iterator(path);
             });
         } else {
-            iterate_directory(
-                    [](const auto &path) { return std::filesystem::directory_iterator(path); });
-        }
+            if(!std::filesystem::is_directory(data_path)) {
+                std::string ext = std::filesystem::path(data_path).extension().string();
+                std::transform(ext.begin(), ext.end(), ext.begin(),
+                               [](unsigned char c) { return std::tolower(c); });
+                // Use a std::map to store by sorted channel order.
+                m_file_channel_read_order_map.emplace(data_path, channel_to_read_id_t());
+                auto& channel_to_read_id = m_file_channel_read_order_map[data_path];
 
+                slow5_file_t *sp = slow5_open(data_path.c_str(),"r");
+                if(sp==NULL){
+                    fprintf(stderr,"Error in opening file\n");
+                    exit(EXIT_FAILURE);
+                }
+                slow5_rec_t *rec = NULL;
+                int ret=0;
+                std::optional<uint16_t> sample_rate_local = std::nullopt;
+                while((ret = slow5_get_next(&rec,sp)) >= 0){
+                    uint64_t len; //length of the array
+                    char* channel_number = slow5_aux_get_string(rec, "channel_number", &len, &ret);
+                    if(ret!=0){
+                        fprintf(stderr,"Error in getting auxiliary attribute from the file. Error code %d\n",ret);
+                        exit(EXIT_FAILURE);
+                    }
+                    if (channel_number == NULL){ //check if the field value exists and print the value
+                        fprintf(stderr,"channel_number is missing for the record %s\n", rec->read_id);
+                        exit(EXIT_FAILURE);
+                    } else{
+                        int channel = atoi(channel_number);
+                        // Update maximum number of channels encountered.
+                        m_max_channel = std::max(m_max_channel, channel);
+                        // Store the read_id in the channel's list.
+                        ReadID read_id;
+                        std::memcpy(read_id.data(), rec->read_id, POD5_READ_ID_SIZE);
+                        channel_to_read_id[channel].push_back(std::move(read_id));
+                    }
+                }
+                slow5_rec_free(rec);
+                slow5_close(sp);
+            }else{
+                iterate_directory(
+                        [](const auto &path) { return std::filesystem::directory_iterator(path); });
+            }
+        }
+    }
+
+    std::unordered_map<std::string, ReadGroup> DataLoader::load_read_groups(
+            std::string data_path,
+            std::string model_path,
+            bool recursive_file_loading) {
+        std::unordered_map<std::string, ReadGroup> read_groups;
+        auto iterate_directory = [&](const auto &iterator_fn) {
+            for (const auto &entry: iterator_fn(data_path)) {
+                std::string ext = std::filesystem::path(entry).extension().string();
+                std::transform(ext.begin(), ext.end(), ext.begin(),
+                               [](unsigned char c) { return std::tolower(c); });
+                auto file_path = entry.path().string();
+                if (ext != ".slow5" and ext != ".blow5") {
+                    continue;
+                }
+                slow5_file_t *sp = slow5_open(file_path.c_str(),"r");
+                if(sp==NULL){
+                    fprintf(stderr,"Error in opening file\n");
+                    exit(EXIT_FAILURE);
+                }
+                int64_t read_group_count = sp->header->num_read_groups;
+                for(int64_t j=0; j<read_group_count; j++){
+                    char* run_id_c = slow5_hdr_get("run_id", j, sp->header);
+                    if(!run_id_c){
+                        fprintf(stderr,"No run_id found in %s.", file_path.c_str());
+                        exit(EXIT_FAILURE);
+                    }
+                    std::string run_id = std::string(run_id);
+                    char* flow_cell_id_c = slow5_hdr_get("flow_cell_id", j, sp->header);
+                    if(!flow_cell_id_c){
+                        fprintf(stderr,"No flowcell_id found in %s.", file_path.c_str());
+                        exit(EXIT_FAILURE);
+                    }
+                    std::string flowcell_id = std::string(flow_cell_id_c);
+                    char* device_id_c = slow5_hdr_get("device_id", j, sp->header);
+                    if(!device_id_c){
+                        fprintf(stderr,"No device_id found in %s.", file_path.c_str());
+                        exit(EXIT_FAILURE);
+                    }
+                    std::string device_id = std::string(device_id_c);
+                    char* exp_start_time_ms_c = slow5_hdr_get("acquisition_start_time", j, sp->header);
+                    if(!exp_start_time_ms_c){
+                        exp_start_time_ms_c = slow5_hdr_get("exp_start_time", j, sp->header);
+                        if(!exp_start_time_ms_c) {
+                            fprintf(stderr, "Neither acquisition_start_time nor exp_start_time found in %s.",
+                                    file_path.c_str());
+                            exit(EXIT_FAILURE);
+                        }
+                    }
+                    std::string exp_start_time_ms = std::string(exp_start_time_ms_c);
+                    char* sample_id_c = slow5_hdr_get("sample_id", j, sp->header);
+                    if(!sample_id_c){
+                        fprintf(stderr,"No sample_id found in %s.", file_path.c_str());
+                        exit(EXIT_FAILURE);
+                    }
+                    std::string sample_id = std::string(sample_id_c);
+                    std::string id = run_id + "_" + model_path;
+                    read_groups[id] = ReadGroup{
+                            run_id,
+                            model_path,
+                            flowcell_id,
+                            device_id,
+                            exp_start_time_ms,
+                            sample_id};
+                }
+                slow5_close(sp);
+            }
+        };
+
+        if (recursive_file_loading) {
+            iterate_directory([](const auto &path) {
+                return std::filesystem::recursive_directory_iterator(path);
+            });
+        } else {
+            if(std::filesystem::is_directory(data_path)){
+                iterate_directory(
+                        [](const auto &path) { return std::filesystem::directory_iterator(path); });
+            } else{
+                std::string ext = std::filesystem::path(data_path).extension().string();
+                std::transform(ext.begin(), ext.end(), ext.begin(),
+                               [](unsigned char c) { return std::tolower(c); });
+                slow5_file_t *sp = slow5_open(data_path.c_str(),"r");
+                if(sp==NULL){
+                    fprintf(stderr,"Error in opening file\n");
+                    exit(EXIT_FAILURE);
+                }
+                int64_t read_group_count = sp->header->num_read_groups;
+                for(int64_t j=0; j<read_group_count; j++){
+                    char* run_id_c = slow5_hdr_get("run_id", j, sp->header);
+                    if(!run_id_c){
+                        fprintf(stderr,"No run_id found in %s.", data_path.c_str());
+                        exit(EXIT_FAILURE);
+                    }
+                    std::string run_id = std::string(run_id_c);
+                    char* flow_cell_id_c = slow5_hdr_get("flow_cell_id", j, sp->header);
+                    if(!flow_cell_id_c){
+                        fprintf(stderr,"No flowcell_id found in %s.", data_path.c_str());
+                        exit(EXIT_FAILURE);
+                    }
+                    std::string flowcell_id = std::string(flow_cell_id_c);
+                    char* device_id_c = slow5_hdr_get("device_id", j, sp->header);
+                    if(!device_id_c){
+                        fprintf(stderr,"No device_id found in %s.", data_path.c_str());
+                        exit(EXIT_FAILURE);
+                    }
+                    std::string device_id = std::string(device_id_c);
+                    char* exp_start_time_ms_c = slow5_hdr_get("acquisition_start_time", j, sp->header);
+                    if(!exp_start_time_ms_c){
+                        exp_start_time_ms_c = slow5_hdr_get("exp_start_time", j, sp->header);
+                        if(!exp_start_time_ms_c) {
+                            fprintf(stderr, "Neither acquisition_start_time nor exp_start_time found in %s.",
+                                    data_path.c_str());
+                            exit(EXIT_FAILURE);
+                        }
+                    }
+                    std::string exp_start_time_ms = std::string(exp_start_time_ms_c);
+                    char* sample_id_c = slow5_hdr_get("sample_id", j, sp->header);
+                    if(!sample_id_c){
+                        fprintf(stderr,"No sample_id found in %s.", data_path.c_str());
+                        exit(EXIT_FAILURE);
+                    }
+                    std::string sample_id = std::string(sample_id_c);
+                    std::string id = run_id + "_" + model_path;
+                    read_groups[id] = ReadGroup{
+                            run_id,
+                            model_path,
+                            flowcell_id,
+                            device_id,
+                            exp_start_time_ms,
+                            sample_id};
+                }
+                slow5_close(sp);
+            }
+        }
         return read_groups;
     }
 
@@ -925,9 +1240,19 @@ namespace dorado {
                 return std::filesystem::recursive_directory_iterator(path);
             });
         } else {
-            return check_directory(
-                    [](const auto& path) { return std::filesystem::directory_iterator(path); });
+            if(std::filesystem::is_directory(data_path)){
+                return check_directory(
+                        [](const auto& path) { return std::filesystem::directory_iterator(path); });
+            } else{
+                std::string ext = std::filesystem::path(data_path).extension().string();
+                std::transform(ext.begin(), ext.end(), ext.begin(),
+                               [](unsigned char c) { return std::tolower(c); });
+                if (ext == ".slow5" || ext == ".blow5") {
+                    return true;
+                }
+            }
         }
+        return false;
     }
 
     uint16_t DataLoader::get_sample_rate(std::string data_path, bool recursive_file_loading) {
@@ -942,33 +1267,28 @@ namespace dorado {
                 if (ext != ".slow5" and ext != ".blow5") {
                     continue;
                 }
-
-                //open the SLOW5 file
                 slow5_file_t *sp = slow5_open(file_path.c_str(),"r");
                 if(sp==NULL){
                     fprintf(stderr,"Error in opening file\n");
                     exit(EXIT_FAILURE);
                 }
-
-                slow5_rec_t *rec = NULL; //slow5 record to be read
-                int ret=0; //for return value
-
-                //iterate through the file until end
+                slow5_rec_t *rec = NULL;
+                int ret=0;
+                std::optional<uint16_t> sample_rate_local = std::nullopt;
                 while((ret = slow5_get_next(&rec,sp)) >= 0){
-                    sample_rate = rec->sampling_rate;
-                    // Break out of loop if sample rate is found.
-                    if (sample_rate) {
+                    sample_rate_local = rec->sampling_rate;
+                    if (sample_rate and sample_rate_local!=sample_rate) {
+                        throw std::runtime_error("different sample rates found in the files");
+                    } else if(!sample_rate){
+                        sample_rate = sample_rate_local;
                         break;
                     }
-
                 }
-
-                //free the SLOW5 record
                 slow5_rec_free(rec);
-
-                //close the SLOW5 file
                 slow5_close(sp);
-
+                if (!sample_rate_local) {
+                    throw std::runtime_error("Unable to determine sample rate for data.");
+                }
             }
         };
 
@@ -977,8 +1297,29 @@ namespace dorado {
                 return std::filesystem::recursive_directory_iterator(path);
             });
         } else {
-            iterate_directory(
-                    [](const auto &path) { return std::filesystem::directory_iterator(path); });
+            if(!std::filesystem::is_directory(data_path)) {
+                std::string ext = std::filesystem::path(data_path).extension().string();
+                std::transform(ext.begin(), ext.end(), ext.begin(),
+                               [](unsigned char c) { return std::tolower(c); });
+                slow5_file_t *sp = slow5_open(data_path.c_str(),"r");
+                if(sp==NULL){
+                    fprintf(stderr,"Error in opening file\n");
+                    exit(EXIT_FAILURE);
+                }
+                slow5_rec_t *rec = NULL;
+                int ret=0;
+                while((ret = slow5_get_next(&rec,sp)) >= 0){
+                    sample_rate = rec->sampling_rate;
+                    if (sample_rate) {
+                        break;
+                    }
+                }
+                slow5_rec_free(rec);
+                slow5_close(sp);
+            }else{
+                iterate_directory(
+                        [](const auto &path) { return std::filesystem::directory_iterator(path); });
+            }
         }
 
         if (sample_rate) {
@@ -1107,9 +1448,79 @@ namespace dorado {
                     m_loaded_read_count++;
                 }
             }
+            // Free everything
+            free(db.mem_bytes);
+            free(db.mem_records);
+
+            if (flag_EOF == 1) {
+                break;
+            }
+        }
+    }
+    void DataLoader::load_slow5_reads_from_file_by_read_ids(const std::string &path, const std::vector<ReadID>& read_ids) {
+        std::unordered_set<std::string> read_ids_map;
+        for(int i=0; i<read_ids.size(); i++){
+            std::string rid(read_ids[i].data(), read_ids[i].data()+POD5_READ_ID_SIZE );
+            read_ids_map.insert(rid);
+        }
+
+        slow5_file_t *sp = slow5_open(path.c_str(), "r");
+        if (sp == NULL) {
+            fprintf(stderr, "Error in opening file\n");
+            exit(EXIT_FAILURE);
+        }
+        int64_t batch_size = slow5_batchsize;
+        int32_t num_threads = slow5_threads;
 
 
+        while (1) {
+            int flag_EOF = 0;
+            db_t db = {0};
+            db.mem_records = (char **) malloc(batch_size * sizeof *db.mem_records);
+            db.mem_bytes = (size_t *) malloc(batch_size * sizeof *db.mem_bytes);
 
+            int64_t record_count = 0;
+            size_t bytes;
+            char *mem;
+
+            while (record_count < batch_size) {
+                if (!(mem = (char *) slow5_get_next_mem(&bytes, sp))) {
+                    if (slow5_errno != SLOW5_ERR_EOF) {
+                        throw std::runtime_error("Error in slow5_get_next_mem.");
+                    } else { //EOF file reached
+                        flag_EOF = 1;
+                        break;
+                    }
+                } else {
+                    db.mem_records[record_count] = mem;
+                    db.mem_bytes[record_count] = bytes;
+                    record_count++;
+                }
+            }
+
+            // Setup multithreading structures
+            core_t core;
+            core.num_thread = (num_threads > record_count) ? record_count : num_threads;
+            if (record_count == 0) {
+                core.num_thread = 1;
+            }
+            core.fp = sp;
+            core.m_device_ = m_device;
+
+            db.n_batch = record_count;
+            db.read_data_ptrs = std::vector<std::shared_ptr<Read>>(record_count);
+
+            work_db(&core, &db, create_read_data);
+
+            for (int64_t i = 0; i < record_count; i++) {
+                if(read_ids_map.find(db.read_data_ptrs[i]->read_id) != read_ids_map.end()){
+                    if (!m_allowed_read_ids ||
+                        (m_allowed_read_ids->find(db.read_data_ptrs[i]->read_id) != m_allowed_read_ids->end())) {
+                        m_pipeline.push_message(std::move(db.read_data_ptrs[i]));
+                        m_loaded_read_count++;
+                    }
+                }
+            }
             // Free everything
             free(db.mem_bytes);
             free(db.mem_records);
