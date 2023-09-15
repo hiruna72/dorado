@@ -18,7 +18,7 @@ namespace dorado {
 class Pipeline;
 struct ReadGroup;
 
-constexpr size_t POD5_READ_ID_SIZE = 16;
+constexpr size_t POD5_READ_ID_SIZE = 36;
 using ReadID = std::array<uint8_t, POD5_READ_ID_SIZE>;
 typedef std::map<int, std::vector<ReadID>> channel_to_read_id_t;
 

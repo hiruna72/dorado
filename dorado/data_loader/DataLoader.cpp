@@ -1056,7 +1056,6 @@ namespace dorado {
                 }
                 slow5_rec_t *rec = NULL;
                 int ret=0;
-                std::optional<uint16_t> sample_rate_local = std::nullopt;
                 while((ret = slow5_get_next(&rec,sp)) >= 0){
                     uint64_t len; //length of the array
                     char* channel_number = slow5_aux_get_string(rec, "channel_number", &len, &ret);
@@ -1365,12 +1364,19 @@ namespace dorado {
             throw std::runtime_error("Error in getting auxiliary attribute 'channel_number' from the file.");
         }
         int32_t channel_number = static_cast<int32_t>(std::stol(channel_number_str));
-        char *exp_start_time = slow5_hdr_get("exp_start_time", rec->read_group, core->fp->header);
-        if (!exp_start_time) {
-            throw std::runtime_error("exp_start_time is missing");
+
+        char* exp_start_time_ms_c = slow5_hdr_get("acquisition_start_time", rec->read_group, core->fp->header);
+        if(!exp_start_time_ms_c){
+            exp_start_time_ms_c = slow5_hdr_get("exp_start_time", rec->read_group, core->fp->header);
+            if(!exp_start_time_ms_c) {
+                throw std::runtime_error("Neither acquisition_start_time nor exp_start_time found");
+            }
         }
-        auto start_time_str = utils::adjust_time(exp_start_time,
-                                                 static_cast<uint32_t>(start_time / rec->sampling_rate));
+        std::string exp_start_time_ms = std::string(exp_start_time_ms_c);
+
+        auto run_acquisition_start_time_ms = utils::get_unix_time_from_string_timestamp(exp_start_time_ms);
+        auto start_time_ms = run_acquisition_start_time_ms + ((start_time * 1000) /rec->sampling_rate);
+        auto start_time_str = utils::get_string_timestamp_from_unix_time(start_time_ms);
 
 //    auto options = torch::TensorOptions().dtype(torch::kFloat32);
         auto options = torch::TensorOptions().dtype(torch::kInt16);
@@ -1387,6 +1393,9 @@ namespace dorado {
         new_read->attributes.channel_number = channel_number;
         new_read->attributes.start_time = start_time_str;
         new_read->attributes.fast5_filename = core->fp->meta.pathname;
+        new_read->start_time_ms = start_time_ms;
+        new_read->run_acquisition_start_time_ms = run_acquisition_start_time_ms;
+
         //
         db->read_data_ptrs[i] = new_read;
         slow5_rec_free(rec);
