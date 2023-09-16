@@ -985,7 +985,7 @@ namespace dorado {
                                 std::inserter(final_read_list, final_read_list.begin()));
             num_reads = std::min(num_reads, final_read_list.size());
         }
-
+        spdlog::debug("num_reads {}", num_reads);
         return num_reads;
     }
 
@@ -1218,6 +1218,7 @@ namespace dorado {
                 slow5_close(sp);
             }
         }
+        spdlog::debug("num read_groups {}", read_groups.size());
         return read_groups;
     }
 
@@ -1322,6 +1323,7 @@ namespace dorado {
         }
 
         if (sample_rate) {
+            spdlog::debug("sample_rate {}", *sample_rate);
             return *sample_rate;
         } else {
             throw std::runtime_error("Unable to determine sample rate for data.");

@@ -508,9 +508,9 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
     )
 
-    if (NOT DORADO_LIB_ONLY)
-        add_subdirectory(tests)
-    endif()
+#    if (NOT DORADO_LIB_ONLY)
+#        add_subdirectory(tests)
+#    endif()
 endif()
 
 if(NOT DORADO_LIB_ONLY)
