@@ -1111,7 +1111,7 @@ namespace dorado {
                         fprintf(stderr,"No run_id found in %s.", file_path.c_str());
                         exit(EXIT_FAILURE);
                     }
-                    std::string run_id = std::string(run_id);
+                    std::string run_id = std::string(run_id_c);
                     char* flow_cell_id_c = slow5_hdr_get("flow_cell_id", j, sp->header);
                     if(!flow_cell_id_c){
                         fprintf(stderr,"No flowcell_id found in %s.", file_path.c_str());
