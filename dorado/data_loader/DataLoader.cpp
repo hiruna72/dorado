@@ -1343,6 +1343,18 @@ namespace dorado {
         //
         std::vector<int16_t> tmp(rec->raw_signal, rec->raw_signal + rec->len_raw_signal);
 //    std::vector<float> floatTmp(tmp.begin(), tmp.end());
+        char* run_id_c = slow5_hdr_get("run_id", rec->read_group, core->fp->header);
+        if(!run_id_c){
+            fprintf(stderr,"No run_id found in %s.", core->fp->meta.pathname);
+            exit(EXIT_FAILURE);
+        }
+        std::string run_id = std::string(run_id_c);
+        char* flow_cell_id_c = slow5_hdr_get("flow_cell_id", rec->read_group, core->fp->header);
+        if(!flow_cell_id_c){
+            fprintf(stderr,"No flowcell_id found in %s.", core->fp->meta.pathname);
+            exit(EXIT_FAILURE);
+        }
+        std::string flowcell_id = std::string(flow_cell_id_c);
 
         int ret = 0;
         uint64_t start_time = slow5_aux_get_uint64(rec, "start_time", &ret);
@@ -1374,29 +1386,36 @@ namespace dorado {
                 throw std::runtime_error("Neither acquisition_start_time nor exp_start_time found");
             }
         }
+
         std::string exp_start_time_ms = std::string(exp_start_time_ms_c);
 
         auto run_acquisition_start_time_ms = utils::get_unix_time_from_string_timestamp(exp_start_time_ms);
-        auto start_time_ms = run_acquisition_start_time_ms + ((start_time * 1000) /rec->sampling_rate);
+        auto start_time_ms = run_acquisition_start_time_ms + ((start_time * 1000) /(uint64_t)rec->sampling_rate);
         auto start_time_str = utils::get_string_timestamp_from_unix_time(start_time_ms);
 
 //    auto options = torch::TensorOptions().dtype(torch::kFloat32);
         auto options = torch::TensorOptions().dtype(torch::kInt16);
-        new_read->sample_rate = rec->sampling_rate;
         new_read->raw_data = torch::from_blob(tmp.data(), tmp.size(), options).clone().to(core->m_device_);
-        new_read->digitisation = rec->digitisation;
-        new_read->range = rec->range;
+        new_read->sample_rate = rec->sampling_rate;
+        new_read->run_acquisition_start_time_ms = run_acquisition_start_time_ms;
+        new_read->start_time_ms = start_time_ms;
         new_read->scaling = rec->range / rec->digitisation;
         new_read->offset = rec->offset;
         new_read->read_id = rec->read_id;
         new_read->num_trimmed_samples = 0;
-        new_read->attributes.mux = mux;
         new_read->attributes.read_number = read_number;
+        new_read->attributes.fast5_filename = core->fp->meta.pathname;
+        new_read->attributes.mux = mux;
+        new_read->attributes.num_samples = rec->len_raw_signal;
         new_read->attributes.channel_number = channel_number;
         new_read->attributes.start_time = start_time_str;
-        new_read->attributes.fast5_filename = core->fp->meta.pathname;
-        new_read->start_time_ms = start_time_ms;
-        new_read->run_acquisition_start_time_ms = run_acquisition_start_time_ms;
+        new_read->run_id = run_id;
+        new_read->start_sample = start_time;
+        new_read->end_sample = start_time + rec->len_raw_signal;
+        new_read->flowcell_id = flowcell_id;
+        new_read->is_duplex = false;
+        new_read->digitisation = rec->digitisation;
+        new_read->range = rec->range;
 
         //
         db->read_data_ptrs[i] = new_read;
