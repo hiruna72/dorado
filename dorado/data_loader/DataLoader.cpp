@@ -802,6 +802,7 @@ namespace dorado {
 #include "slow5/slow5.h"
 #include "slow5_extra.h"
 #include "slow5_thread.h"
+#include <slow5/slow5_mt.h>
 
 namespace dorado {
     void DataLoader::load_reads(const std::string &path,
@@ -1009,30 +1010,46 @@ namespace dorado {
                     fprintf(stderr,"Error in opening file\n");
                     exit(EXIT_FAILURE);
                 }
-                slow5_rec_t *rec = NULL;
+                slow5_rec_t **rec = NULL;
                 int ret=0;
-                std::optional<uint16_t> sample_rate_local = std::nullopt;
-                while((ret = slow5_get_next(&rec,sp)) >= 0){
-                    uint64_t len; //length of the array
-                    char* channel_number = slow5_aux_get_string(rec, "channel_number", &len, &ret);
-                    if(ret!=0){
-                        fprintf(stderr,"Error in getting auxiliary attribute from the file. Error code %d\n",ret);
-                        exit(EXIT_FAILURE);
+                int batch_size = 4096;
+                int num_thread = 8;
+
+                slow5_mt_t *mt = slow5_init_mt(num_thread,sp);
+                slow5_batch_t *read_batch = slow5_init_batch(batch_size);
+
+                while((ret = slow5_get_next_batch(mt,read_batch,batch_size)) > 0){
+
+                    for(int i=0;i<ret;i++){
+                        rec = read_batch->slow5_rec;
+
+                        uint64_t len; //length of the array
+                        char* channel_number = slow5_aux_get_string(rec[i], "channel_number", &len, &ret);
+                        if(ret!=0){
+                            fprintf(stderr,"Error in getting auxiliary attribute from the file. Error code %d\n",ret);
+                            exit(EXIT_FAILURE);
+                        }
+                        if (channel_number == NULL){ //check if the field value exists and print the value
+                            fprintf(stderr,"channel_number is missing for the record %s\n", rec[i]->read_id);
+                            exit(EXIT_FAILURE);
+                        } else{
+                            int channel = atoi(channel_number);
+                            // Update maximum number of channels encountered.
+                            m_max_channel = std::max(m_max_channel, channel);
+                            // Store the read_id in the channel's list.
+                            ReadID read_id;
+                            std::memcpy(read_id.data(), rec[i]->read_id, POD5_READ_ID_SIZE);
+                            channel_to_read_id[channel].push_back(std::move(read_id));
+                        }
                     }
-                    if (channel_number == NULL){ //check if the field value exists and print the value
-                        fprintf(stderr,"channel_number is missing for the record %s\n", rec->read_id);
-                        exit(EXIT_FAILURE);
-                    } else{
-                        int channel = atoi(channel_number);
-                        // Update maximum number of channels encountered.
-                        m_max_channel = std::max(m_max_channel, channel);
-                        // Store the read_id in the channel's list.
-                        ReadID read_id;
-                        std::memcpy(read_id.data(), rec->read_id, POD5_READ_ID_SIZE);
-                        channel_to_read_id[channel].push_back(std::move(read_id));
+
+                    if(ret<batch_size){ //this indicates nothing left to read //need to handle errors
+                        break;
                     }
                 }
-                slow5_rec_free(rec);
+
+                slow5_free_batch(read_batch);
+                slow5_free_mt(mt);
                 slow5_close(sp);
             }
         };
