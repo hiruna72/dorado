@@ -999,11 +999,12 @@ namespace dorado {
                 if (ext != ".blow5" and ext != ".slow5") {
                     continue;
                 }
+                std::string file_path_str = file_path.string();
                 // Use a std::map to store by sorted channel order.
-                m_file_channel_read_order_map.emplace(data_path, channel_to_read_id_t());
-                auto& channel_to_read_id = m_file_channel_read_order_map[data_path];
+                m_file_channel_read_order_map.emplace(file_path_str, channel_to_read_id_t());
+                auto& channel_to_read_id = m_file_channel_read_order_map[file_path_str];
 
-                slow5_file_t *sp = slow5_open(file_path.c_str(),"r");
+                slow5_file_t *sp = slow5_open(file_path_str.c_str(),"r");
                 if(sp==NULL){
                     fprintf(stderr,"Error in opening file\n");
                     exit(EXIT_FAILURE);
@@ -1401,10 +1402,10 @@ namespace dorado {
         new_read->start_time_ms = start_time_ms;
         new_read->scaling = rec->range / rec->digitisation;
         new_read->offset = rec->offset;
-        new_read->read_id = rec->read_id;
+        new_read->read_id = std::string(rec->read_id);
         new_read->num_trimmed_samples = 0;
         new_read->attributes.read_number = read_number;
-        new_read->attributes.fast5_filename = core->fp->meta.pathname;
+        new_read->attributes.fast5_filename = std::string(core->fp->meta.pathname);
         new_read->attributes.mux = mux;
         new_read->attributes.num_samples = rec->len_raw_signal;
         new_read->attributes.channel_number = channel_number;
@@ -1416,6 +1417,8 @@ namespace dorado {
         new_read->is_duplex = false;
         new_read->digitisation = rec->digitisation;
         new_read->range = rec->range;
+//        spdlog::debug("attributes.fast5_filename {}", new_read->attributes.fast5_filename);
+//        spdlog::debug("new_read->read_id {}", new_read->read_id);
 
         //
         db->read_data_ptrs[i] = new_read;
@@ -1488,6 +1491,7 @@ namespace dorado {
         }
     }
     void DataLoader::load_slow5_reads_from_file_by_read_ids(const std::string &path, const std::vector<ReadID>& read_ids) {
+        spdlog::debug("{}", __func__);
         std::unordered_set<std::string> read_ids_map;
         for(int i=0; i<read_ids.size(); i++){
             std::string rid(read_ids[i].data(), read_ids[i].data()+POD5_READ_ID_SIZE );
