@@ -1039,7 +1039,7 @@ namespace dorado {
                             channel_to_read_id[channel].push_back(std::move(read_id));
                         }
                     }
-                    if(ret<slow5_batchsize){ //this indicates nothing left to read //need to handle errors
+                    if(ret_batch<slow5_batchsize){ //this indicates nothing left to read //need to handle errors
                         break;
                     }
                 }
@@ -1096,7 +1096,7 @@ namespace dorado {
                             channel_to_read_id[channel].push_back(std::move(read_id));
                         }
                     }
-                    if(ret<slow5_batchsize){ //this indicates nothing left to read //need to handle errors
+                    if(ret_batch<slow5_batchsize){ //this indicates nothing left to read //need to handle errors
                         break;
                     }
                 }
