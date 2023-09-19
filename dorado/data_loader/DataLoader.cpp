@@ -1355,28 +1355,19 @@ namespace dorado {
         }
     }
 
-    void create_read_data(core_t *core, db_t *db, int32_t i) {
-        //
-        struct slow5_rec *rec = NULL;
-        if (slow5_rec_depress_parse(&db->mem_records[i], &db->mem_bytes[i], NULL, &rec, core->fp) != 0) {
-            exit(EXIT_FAILURE);
-        } else {
-            free(db->mem_records[i]);
-        }
+    std::shared_ptr<dorado::Read> create_read(slow5_file_t *sp, slow5_rec_t * rec, std::string m_device_){
         auto new_read = std::make_shared<dorado::Read>();
 
-        //
         std::vector<int16_t> tmp(rec->raw_signal, rec->raw_signal + rec->len_raw_signal);
-//    std::vector<float> floatTmp(tmp.begin(), tmp.end());
-        char* run_id_c = slow5_hdr_get("run_id", rec->read_group, core->fp->header);
+        char* run_id_c = slow5_hdr_get("run_id", rec->read_group, sp->header);
         if(!run_id_c){
-            fprintf(stderr,"No run_id found in %s.", core->fp->meta.pathname);
+            fprintf(stderr,"No run_id found in %s.", sp->meta.pathname);
             exit(EXIT_FAILURE);
         }
         std::string run_id = std::string(run_id_c);
-        char* flow_cell_id_c = slow5_hdr_get("flow_cell_id", rec->read_group, core->fp->header);
+        char* flow_cell_id_c = slow5_hdr_get("flow_cell_id", rec->read_group, sp->header);
         if(!flow_cell_id_c){
-            fprintf(stderr,"No flowcell_id found in %s.", core->fp->meta.pathname);
+            fprintf(stderr,"No flowcell_id found in %s.", sp->meta.pathname);
             exit(EXIT_FAILURE);
         }
         std::string flowcell_id = std::string(flow_cell_id_c);
@@ -1404,9 +1395,9 @@ namespace dorado {
         }
         int32_t channel_number = static_cast<int32_t>(std::stol(channel_number_str));
 
-        char* exp_start_time_ms_c = slow5_hdr_get("acquisition_start_time", rec->read_group, core->fp->header);
+        char* exp_start_time_ms_c = slow5_hdr_get("acquisition_start_time", rec->read_group, sp->header);
         if(!exp_start_time_ms_c){
-            exp_start_time_ms_c = slow5_hdr_get("exp_start_time", rec->read_group, core->fp->header);
+            exp_start_time_ms_c = slow5_hdr_get("exp_start_time", rec->read_group, sp->header);
             if(!exp_start_time_ms_c) {
                 throw std::runtime_error("Neither acquisition_start_time nor exp_start_time found");
             }
@@ -1418,9 +1409,9 @@ namespace dorado {
         auto start_time_ms = run_acquisition_start_time_ms + ((start_time * 1000) /(uint64_t)rec->sampling_rate);
         auto start_time_str = utils::get_string_timestamp_from_unix_time(start_time_ms);
 
-//    auto options = torch::TensorOptions().dtype(torch::kFloat32);
+        //    auto options = torch::TensorOptions().dtype(torch::kFloat32);
         auto options = torch::TensorOptions().dtype(torch::kInt16);
-        new_read->raw_data = torch::from_blob(tmp.data(), tmp.size(), options).clone().to(core->m_device_);
+        new_read->raw_data = torch::from_blob(tmp.data(), tmp.size(), options).clone().to(m_device_);
         new_read->sample_rate = rec->sampling_rate;
         new_read->run_acquisition_start_time_ms = run_acquisition_start_time_ms;
         new_read->start_time_ms = start_time_ms;
@@ -1429,7 +1420,7 @@ namespace dorado {
         new_read->read_id = std::string(rec->read_id);
         new_read->num_trimmed_samples = 0;
         new_read->attributes.read_number = read_number;
-        new_read->attributes.fast5_filename = std::string(core->fp->meta.pathname);
+        new_read->attributes.fast5_filename = std::string(sp->meta.pathname);
         new_read->attributes.mux = mux;
         new_read->attributes.num_samples = rec->len_raw_signal;
         new_read->attributes.channel_number = channel_number;
@@ -1441,9 +1432,20 @@ namespace dorado {
         new_read->is_duplex = false;
         new_read->digitisation = rec->digitisation;
         new_read->range = rec->range;
-//        spdlog::debug("attributes.fast5_filename {}", new_read->attributes.fast5_filename);
-//        spdlog::debug("new_read->read_id {}", new_read->read_id);
 
+        return new_read;
+
+    }
+
+    void create_read_data(core_t *core, db_t *db, int32_t i) {
+        //
+        struct slow5_rec *rec = NULL;
+        if (slow5_rec_depress_parse(&db->mem_records[i], &db->mem_bytes[i], NULL, &rec, core->fp) != 0) {
+            exit(EXIT_FAILURE);
+        } else {
+            free(db->mem_records[i]);
+        }
+        auto new_read = create_read(core->fp, rec, core->m_device_);
         //
         db->read_data_ptrs[i] = new_read;
         slow5_rec_free(rec);
@@ -1527,10 +1529,49 @@ namespace dorado {
             fprintf(stderr, "Error in opening file\n");
             exit(EXIT_FAILURE);
         }
+        slow5_rec_t **rec = NULL;
+        int ret = slow5_idx_load(sp);
+        if(ret<0){
+            fprintf(stderr,"Error in loading index\n");
+            exit(EXIT_FAILURE);
+        }
+        int num_thread = slow5_threads;
+        int num_rid = read_ids.size();
+        char *rid[num_rid];
+
+        for(int i=0; i<read_ids.size(); i++){
+            std::string read_s(read_ids[i].data(), read_ids[i].data()+POD5_READ_ID_SIZE);
+            rid[i] = new char[POD5_READ_ID_SIZE + 1];
+            strcpy(rid[i], read_s.c_str());
+//            rid[i] = read_s.data();
+        }
+
+        ret = slow5_get_batch_lazy(&rec, sp, rid, num_rid, num_thread);
+        assert(ret==num_rid);
+        for(int i=0;i<ret;i++){
+//            uint64_t len_raw_signal = rec[i]->len_raw_signal;
+//            printf("%s\t%ld\n",rec[i]->read_id,len_raw_signal);
+
+            if (!m_allowed_read_ids ||
+                (m_allowed_read_ids->find(std::string(rec[i]->read_id)) != m_allowed_read_ids->end())) {
+                auto new_read = create_read(sp, rec[i], m_device);
+
+                m_pipeline.push_message(new_read);
+                m_loaded_read_count++;
+            }
+        }
+
+        for(int i=0; i<read_ids.size(); i++){
+            delete[] rid[i];
+        }
+
+        slow5_free_batch_lazy(&rec,ret);
+
+        slow5_idx_unload(sp);
+        slow5_close(sp);
+        /*
         int64_t batch_size = slow5_batchsize;
         int32_t num_threads = slow5_threads;
-
-
         while (1) {
             int flag_EOF = 0;
             db_t db = {0};
@@ -1587,6 +1628,8 @@ namespace dorado {
                 break;
             }
         }
+         */
+
     }
 
 
