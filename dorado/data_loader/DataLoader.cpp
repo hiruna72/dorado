@@ -1011,16 +1011,15 @@ namespace dorado {
                     exit(EXIT_FAILURE);
                 }
                 slow5_rec_t **rec = NULL;
+                int ret_batch=0;
                 int ret=0;
 
                 slow5_mt_t *mt = slow5_init_mt(slow5_threads,sp);
                 slow5_batch_t *read_batch = slow5_init_batch(slow5_batchsize);
 
-                while((ret = slow5_get_next_batch(mt,read_batch,slow5_batchsize)) > 0){
-
-                    for(int i=0;i<ret;i++){
-                        rec = read_batch->slow5_rec;
-
+                while((ret_batch = slow5_get_next_batch(mt,read_batch,slow5_batchsize)) > 0){
+                    rec = read_batch->slow5_rec;
+                    for(int i=0;i<ret_batch;i++){
                         uint64_t len; //length of the array
                         char* channel_number = slow5_aux_get_string(rec[i], "channel_number", &len, &ret);
                         if(ret!=0){
@@ -1040,12 +1039,10 @@ namespace dorado {
                             channel_to_read_id[channel].push_back(std::move(read_id));
                         }
                     }
-
                     if(ret<slow5_batchsize){ //this indicates nothing left to read //need to handle errors
                         break;
                     }
                 }
-
                 slow5_free_batch(read_batch);
                 slow5_free_mt(mt);
                 slow5_close(sp);
@@ -1071,16 +1068,15 @@ namespace dorado {
                     exit(EXIT_FAILURE);
                 }
                 slow5_rec_t **rec = NULL;
+                int ret_batch=0;
                 int ret=0;
 
                 slow5_mt_t *mt = slow5_init_mt(slow5_threads,sp);
                 slow5_batch_t *read_batch = slow5_init_batch(slow5_batchsize);
 
-                while((ret = slow5_get_next_batch(mt,read_batch,slow5_batchsize)) > 0){
-
-                    for(int i=0;i<ret;i++){
-                        rec = read_batch->slow5_rec;
-
+                while((ret_batch = slow5_get_next_batch(mt,read_batch,slow5_batchsize)) > 0){
+                    rec = read_batch->slow5_rec;
+                    for(int i=0;i<ret_batch;i++){
                         uint64_t len; //length of the array
                         char* channel_number = slow5_aux_get_string(rec[i], "channel_number", &len, &ret);
                         if(ret!=0){
@@ -1100,12 +1096,10 @@ namespace dorado {
                             channel_to_read_id[channel].push_back(std::move(read_id));
                         }
                     }
-
                     if(ret<slow5_batchsize){ //this indicates nothing left to read //need to handle errors
                         break;
                     }
                 }
-
                 slow5_free_batch(read_batch);
                 slow5_free_mt(mt);
                 slow5_close(sp);
