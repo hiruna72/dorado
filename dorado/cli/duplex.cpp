@@ -99,7 +99,13 @@ int duplex(int argc, char* argv[]) {
     parser.add_argument("-v", "--verbose").default_value(false).implicit_value(true);
 
     parser.add_argument("-I").help("minimap2 index batch size.").default_value(std::string("16G"));
+    parser.add_argument("--slow5_threads")
+            .default_value(default_parameters.slow5_threads)
+            .scan<'i', int32_t>();
 
+    parser.add_argument("--slow5_batchsize")
+            .default_value(default_parameters.slow5_batchsize)
+            .scan<'i', int64_t>();
     try {
         auto remaining_args = parser.parse_known_args(argc, argv);
         auto internal_parser = utils::parse_internal_options(remaining_args);
@@ -346,7 +352,9 @@ int duplex(int argc, char* argv[]) {
             }
             hts_writer_ref.set_and_write_header(hdr.get());
 
-            DataLoader loader(*pipeline, "cpu", num_devices, 0, std::move(read_list));
+            int32_t slow5_threads = parser.get<int32_t>("--slow5_threads");
+            int64_t slow5_batchsize = parser.get<int64_t>("--slow5_batchsize");
+            DataLoader loader(*pipeline, "cpu", num_devices, 0, std::move(read_list), {}, slow5_threads, slow5_batchsize);
 
             stats_sampler = std::make_unique<dorado::stats::StatsSampler>(
                     kStatsPeriod, stats_reporters, stats_callables);
