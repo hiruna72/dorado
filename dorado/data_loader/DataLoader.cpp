@@ -1518,11 +1518,6 @@ namespace dorado {
     }
     void DataLoader::load_slow5_reads_from_file_by_read_ids(const std::string &path, const std::vector<ReadID>& read_ids) {
         spdlog::debug("{}", __func__);
-        std::unordered_set<std::string> read_ids_map;
-        for(int i=0; i<read_ids.size(); i++){
-            std::string rid(read_ids[i].data(), read_ids[i].data()+POD5_READ_ID_SIZE );
-            read_ids_map.insert(rid);
-        }
 
         slow5_file_t *sp = slow5_open(path.c_str(), "r");
         if (sp == NULL) {
@@ -1535,101 +1530,39 @@ namespace dorado {
             fprintf(stderr,"Error in loading index\n");
             exit(EXIT_FAILURE);
         }
-        int num_thread = slow5_threads;
-        int num_rid = read_ids.size();
-        char *rid[num_rid];
 
-        for(int i=0; i<read_ids.size(); i++){
-            std::string read_s(read_ids[i].data(), read_ids[i].data()+POD5_READ_ID_SIZE);
-            rid[i] = new char[POD5_READ_ID_SIZE + 1];
-            strcpy(rid[i], read_s.c_str());
-//            rid[i] = read_s.data();
-        }
+        size_t num_rid = read_ids.size();
+        size_t read_count = 0;
+        char **rid = (char**)malloc(sizeof(char*)*slow5_batchsize);
 
-        ret = slow5_get_batch_lazy(&rec, sp, rid, num_rid, num_thread);
-        assert(ret==num_rid);
-        for(int i=0;i<ret;i++){
-//            uint64_t len_raw_signal = rec[i]->len_raw_signal;
-//            printf("%s\t%ld\n",rec[i]->read_id,len_raw_signal);
-
-            if (!m_allowed_read_ids ||
-                (m_allowed_read_ids->find(std::string(rec[i]->read_id)) != m_allowed_read_ids->end())) {
-                auto new_read = create_read(sp, rec[i], m_device);
-
-                m_pipeline.push_message(new_read);
-                m_loaded_read_count++;
+        while(1){
+            int local_batch_size = (slow5_batchsize > (num_rid - read_count)) ? num_rid - read_count : slow5_batchsize;
+            for(size_t i=0; i<local_batch_size; i++){
+                std::string read_s(read_ids[read_count].data(), read_ids[read_count].data()+POD5_READ_ID_SIZE);
+                rid[i] = strdup(read_s.c_str());
+                read_count++;
             }
-        }
-
-        for(int i=0; i<read_ids.size(); i++){
-            delete[] rid[i];
-        }
-
-        slow5_free_batch_lazy(&rec,ret);
-
-        slow5_idx_unload(sp);
-        slow5_close(sp);
-        /*
-        int64_t batch_size = slow5_batchsize;
-        int32_t num_threads = slow5_threads;
-        while (1) {
-            int flag_EOF = 0;
-            db_t db = {0};
-            db.mem_records = (char **) malloc(batch_size * sizeof *db.mem_records);
-            db.mem_bytes = (size_t *) malloc(batch_size * sizeof *db.mem_bytes);
-
-            int64_t record_count = 0;
-            size_t bytes;
-            char *mem;
-
-            while (record_count < batch_size) {
-                if (!(mem = (char *) slow5_get_next_mem(&bytes, sp))) {
-                    if (slow5_errno != SLOW5_ERR_EOF) {
-                        throw std::runtime_error("Error in slow5_get_next_mem.");
-                    } else { //EOF file reached
-                        flag_EOF = 1;
-                        break;
-                    }
-                } else {
-                    db.mem_records[record_count] = mem;
-                    db.mem_bytes[record_count] = bytes;
-                    record_count++;
+            ret = slow5_get_batch_lazy(&rec, sp, rid, local_batch_size, slow5_threads);
+            assert(ret==local_batch_size);
+            for(int i=0;i<ret;i++){
+                if (!m_allowed_read_ids ||
+                    (m_allowed_read_ids->find(std::string(rec[i]->read_id)) != m_allowed_read_ids->end())) {
+                    auto new_read = create_read(sp, rec[i], m_device);
+                    m_pipeline.push_message(new_read);
+                    m_loaded_read_count++;
                 }
             }
-
-            // Setup multithreading structures
-            core_t core;
-            core.num_thread = (num_threads > record_count) ? record_count : num_threads;
-            if (record_count == 0) {
-                core.num_thread = 1;
+            slow5_free_batch_lazy(&rec,ret);
+            for(int i=0; i<local_batch_size; i++){
+                free(rid[i]);
             }
-            core.fp = sp;
-            core.m_device_ = m_device;
-
-            db.n_batch = record_count;
-            db.read_data_ptrs = std::vector<std::shared_ptr<Read>>(record_count);
-
-            work_db(&core, &db, create_read_data);
-
-            for (int64_t i = 0; i < record_count; i++) {
-                if(read_ids_map.find(db.read_data_ptrs[i]->read_id) != read_ids_map.end()){
-                    if (!m_allowed_read_ids ||
-                        (m_allowed_read_ids->find(db.read_data_ptrs[i]->read_id) != m_allowed_read_ids->end())) {
-                        m_pipeline.push_message(std::move(db.read_data_ptrs[i]));
-                        m_loaded_read_count++;
-                    }
-                }
-            }
-            // Free everything
-            free(db.mem_bytes);
-            free(db.mem_records);
-
-            if (flag_EOF == 1) {
+            if(local_batch_size < slow5_batchsize){
                 break;
             }
         }
-         */
-
+        free(rid);
+        slow5_idx_unload(sp);
+        slow5_close(sp);
     }
 
 
