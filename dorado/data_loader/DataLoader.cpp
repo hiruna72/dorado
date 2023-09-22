@@ -1515,9 +1515,10 @@ namespace dorado {
                 break;
             }
         }
+        slow5_close(sp);
     }
     void DataLoader::load_slow5_reads_from_file_by_read_ids(const std::string &path, const std::vector<ReadID>& read_ids) {
-        spdlog::debug("{}", __func__);
+//        spdlog::debug("{}", __func__);
 
         slow5_file_t *sp = slow5_open(path.c_str(), "r");
         if (sp == NULL) {
