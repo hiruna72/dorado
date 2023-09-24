@@ -914,7 +914,7 @@ namespace dorado {
                                   const std::unordered_set<std::string> &ignore_read_list,
                                   bool recursive_file_loading) {
         size_t num_reads = 0;
-
+        return num_reads;
         auto iterate_directory = [&](const auto &iterator_fn) {
             for (const auto &entry: iterator_fn(data_path)) {
                 std::string ext = std::filesystem::path(entry).extension().string();
@@ -1549,6 +1549,7 @@ namespace dorado {
                 if (!m_allowed_read_ids ||
                     (m_allowed_read_ids->find(std::string(rec[i]->read_id)) != m_allowed_read_ids->end())) {
                     auto new_read = create_read(sp, rec[i], m_device);
+                    spdlog::debug("read_id queued: {}",rec[i]->read_id);
                     m_pipeline.push_message(new_read);
                     m_loaded_read_count++;
                 }
