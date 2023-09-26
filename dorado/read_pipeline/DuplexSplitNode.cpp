@@ -526,8 +526,14 @@ std::vector<std::shared_ptr<Read>> DuplexSplitNode::split(std::shared_ptr<Read> 
                                                          std::to_string(ext_read.read->subread_id));
             ext_read.read->read_id = subread_uuid;
         }
-
         split_result.push_back(std::move(ext_read.read));
+    }
+    std::string split_info_str = "";
+    for (const auto& read: split_result){
+        split_info_str += std::string (read->read_id) + ";";
+    }
+    if (to_split.size() > 1) {
+        spdlog::info("Split_rids {}:{}", init_read->read_id, split_info_str);
     }
 
     spdlog::trace("Read {} split into {} subreads", init_read->read_id, split_result.size());
