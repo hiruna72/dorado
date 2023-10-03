@@ -2,8 +2,8 @@ OPTION(BUILD_KOI_FROM_SOURCE OFF)
 
 function(get_best_compatible_koi_version KOI_CUDA)
     if (${CMAKE_SYSTEM_PROCESSOR} STREQUAL "aarch64")
-        # Koi only provides binaries for 11.4 when targeting aarch64
-        set(SUPPORTED_VERSIONS 11.4)
+        # Koi only provides binaries for 11.4 and 10.2 when targeting aarch64
+        set(SUPPORTED_VERSIONS 11.4 10.2)
     else()
         set(SUPPORTED_VERSIONS 12.0 11.8 11.7 11.3)
     endif()
@@ -20,6 +20,7 @@ endfunction()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR WIN32)
 
+    set(KOI_VERSION 0.3.5)
     if(BUILD_KOI_FROM_SOURCE)
         message(STATUS "Building Koi from source")
         set(KOI_DIR "${DORADO_3RD_PARTY}/koi")
@@ -32,15 +33,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR WIN32)
                 message("Cloning Koi using ssh")
                 execute_process(COMMAND git clone git@git.oxfordnanolabs.local:machine-learning/koi.git ${KOI_DIR})
             endif()
-            execute_process(COMMAND git checkout fb8a97457833928ca341b3e378f6569a78f644c9 WORKING_DIRECTORY ${KOI_DIR})
+            execute_process(COMMAND git checkout v${KOI_VERSION} WORKING_DIRECTORY ${KOI_DIR})
+            execute_process(COMMAND git submodule update --init --checkout WORKING_DIRECTORY ${KOI_DIR})
         endif()
         add_subdirectory(${KOI_DIR}/koi/lib)
 
         set(KOI_INCLUDE ${KOI_DIR}/koi/lib)
         set(KOI_LIBRARIES koi)
     else()
-
-        set(KOI_VERSION 0.2.1)
         find_package(CUDAToolkit REQUIRED)
         get_best_compatible_koi_version(KOI_CUDA)
         set(KOI_DIR libkoi-${KOI_VERSION}-${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}-cuda-${KOI_CUDA})

@@ -1,36 +1,43 @@
 #pragma once
-#include "../nn/ModelRunner.h"
 #include "ReadPipeline.h"
+#include "utils/stats.h"
+
+#include <atomic>
+#include <memory>
+#include <vector>
 
 namespace dorado {
 
-class StereoDuplexEncoderNode : public ReadSink {
+class StereoDuplexEncoderNode : public MessageSink {
 public:
-    // Chunk size and overlap are in raw samples
-    StereoDuplexEncoderNode(ReadSink &sink,
-                            std::map<std::string, std::string> template_complement_map);
-    ~StereoDuplexEncoderNode();
+    StereoDuplexEncoderNode(int input_signal_stride);
+
+    std::shared_ptr<dorado::Read> stereo_encode(std::shared_ptr<dorado::Read> template_read,
+                                                std::shared_ptr<dorado::Read> complement_read,
+                                                uint64_t temp_start,
+                                                uint64_t temp_end,
+                                                uint64_t comp_start,
+                                                uint64_t comp_end);
+
+    ~StereoDuplexEncoderNode() { terminate_impl(); };
+    std::string get_name() const override { return "StereoDuplexEncoderNode"; }
+    stats::NamedStats sample_stats() const override;
+    void terminate(const FlushOptions& flush_options) override { terminate_impl(); }
+    void restart() override;
 
 private:
+    void start_threads();
+    void terminate_impl();
     // Consume reads from input queue
     void worker_thread();
-    ReadSink &m_sink;
 
-    std::mutex m_tc_map_mutex;
-    std::mutex m_ct_map_mutex;
-    std::mutex m_read_cache_mutex;
+    std::vector<std::unique_ptr<std::thread>> m_worker_threads;
 
-    std::vector<std::unique_ptr<std::thread>> worker_threads;
+    // The stride which was used to simplex call the data
+    int m_input_signal_stride;
 
-    // Time when Basecaller Node is initialised. Used for benchmarking and debugging
-    std::chrono::time_point<std::chrono::system_clock> initialization_time;
-
-    // Time when Basecaller Node terminates. Used for benchmarking and debugging
-    std::chrono::time_point<std::chrono::system_clock> termination_time;
-
-    std::map<std::string, std::string> m_template_complement_map;
-    std::map<std::string, std::string> m_complement_template_map;
-    std::map<std::string, std::shared_ptr<Read>> read_cache;
+    // Performance monitoring stats.
+    std::atomic<int64_t> m_num_encoded_pairs = 0;
 };
 
 }  // namespace dorado

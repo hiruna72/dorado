@@ -3,10 +3,12 @@
 
 #include "MetalCRFModel.h"
 
-#include "../decode/beam_search.h"
-#include "../utils/metal_utils.h"
-#include "../utils/module_utils.h"
-#include "../utils/tensor_utils.h"
+#include "CRFModelConfig.h"
+#include "decode/beam_search.h"
+#include "utils/math_utils.h"
+#include "utils/metal_utils.h"
+#include "utils/module_utils.h"
+#include "utils/tensor_utils.h"
 
 #include <math.h>
 #include <spdlog/spdlog.h>
@@ -18,15 +20,19 @@ using namespace dorado::utils;
 using namespace std::chrono_literals;
 using namespace torch::nn;
 namespace F = torch::nn::functional;
-using Slice = torch::indexing::Slice;
+using torch::indexing::Ellipsis;
+using torch::indexing::Slice;
 
 static constexpr auto torch_dtype = torch::kF16;
 static const size_t dtype_bytes = torch::elementSize(torch_dtype);
 
 namespace {
-// SIMD tile size dictated by the metal spec.
-const int kTileSize = 8;
+// SIMD tile size dictated by the Metal spec.
+constexpr int kTileSize = 8;
+// We assume non-AMD GPUs, in which case this is 32.
+constexpr int kSIMDGroupWidth = 32;
 
+// Returns true on success.
 bool finishCommandBuffer(const char *label, MTL::CommandBuffer *cb, int try_count) {
     cb->commit();
     cb->waitUntilCompleted();
@@ -34,14 +40,16 @@ bool finishCommandBuffer(const char *label, MTL::CommandBuffer *cb, int try_coun
     auto status = cb->status();
     bool success = (status == MTL::CommandBufferStatusCompleted);
     if (success) {
-        spdlog::debug("Metal command buffer {}: {} ms", label,
-                      1000.f * float(cb->GPUEndTime() - cb->GPUStartTime()));
+        spdlog::debug("Metal command buffer {}: {} ms succeeded (try {})", label,
+                      1000.f * float(cb->GPUEndTime() - cb->GPUStartTime()), try_count);
     } else {
-        spdlog::warn("Metal command buffer {} failed: {}, try #{}", label, status, try_count);
+        spdlog::warn("Metal command buffer {} failed: status {} (try {})", label, status,
+                     try_count);
         if (status == MTL::CommandBufferStatusError) {
             const auto *const error_ptr = cb->error();
             if (error_ptr)
-                spdlog::warn("Command buffer error code: {}", error_ptr->code());
+                spdlog::warn("Command buffer error code: {} ({})", error_ptr->code(),
+                             error_ptr->localizedDescription()->utf8String());
         }
     }
     return success;
@@ -85,6 +93,8 @@ struct MetalConv1dImpl : Module {
 
         // For layers 1 and 2 we only have kernels for particular in/out feature sizes.
         if (layer == 1) {
+            // Simplex in_size == 1.  Duplex in_size == 13.
+            assert(in_size == 1 || in_size == 13);
             assert(out_size == 4 || out_size == 16);
             assert(win_size = 5);
         } else if (layer == 2) {
@@ -93,9 +103,32 @@ struct MetalConv1dImpl : Module {
             assert(win_size = 5);
         }
 
-        const std::vector<int32_t> args_{in_size,      win_size,   out_size,  stride,
-                                         win_size / 2, chunk_size, batch_size};
-        args = create_vec_buffer(device, args_);
+        if (layer != 3) {
+            // Layers 1 and 2 are executed with a single kernel launch.
+            // The last 2 arguments are unused.
+            const std::vector<int32_t> args{in_size,    win_size,   out_size, stride, win_size / 2,
+                                            chunk_size, batch_size, 0,        0};
+            m_args.push_back(create_vec_buffer(device, args));
+        } else {
+            // We cut up the time span for individual kernel launches for conv3 since it is by far
+            // the most time consuming, and sup times can be of the order of seconds, which
+            // is known to provoke command buffer errors.
+            // The last 2 arguments specify the output time step range, i.e. time step range after
+            // dividing by stride.
+            const int output_time_step_count = chunk_size / stride;
+            constexpr int kMaxTimeSteps = 20;
+            const int num_pieces = (output_time_step_count + kMaxTimeSteps - 1) / kMaxTimeSteps;
+            for (int i = 0; i < num_pieces; ++i) {
+                const int time_step_begin = i * kMaxTimeSteps;
+                const int time_step_end = std::min((i + 1) * kMaxTimeSteps, output_time_step_count);
+                const std::vector<int32_t> args{in_size,    win_size,        out_size,
+                                                stride,     win_size / 2,    chunk_size,
+                                                batch_size, time_step_begin, time_step_end};
+                m_args.push_back(create_vec_buffer(device, args));
+            }
+            spdlog::debug("conv3 output_time_step_count {} => {} kernel launches",
+                          output_time_step_count, num_pieces);
+        }
 
         auto weight = torch::empty({out_size, in_size, win_size}, torch::kF32);
         auto bias = torch::empty({out_size}, torch::kF32);
@@ -127,26 +160,32 @@ struct MetalConv1dImpl : Module {
 
         std::vector<std::tuple<std::string, MetalConstant>> metal_constants = {
                 {"kConvOutputClamp", clamp}};
-        const int kernel_threads = 32 * kernel_simd_groups;
+        const int kernel_threads = kSIMDGroupWidth * kernel_simd_groups;
         std::string kernel_name = "conv" + std::to_string(layer);
-        // Layers 1 and 2 have variants with a different intermediate feature size.
-        if (layer == 1)
-            kernel_name += "_out" + std::to_string(out_size);
-        else if (layer == 2)
-            kernel_name += "_in" + std::to_string(in_size);
+        // Layer 1 and 2 conv kernels are tailored to specific feature sizes.
+        if (layer == 1 || layer == 2) {
+            kernel_name += "_in" + std::to_string(in_size) + "_out" + std::to_string(out_size);
+        }
+
         conv_cps = make_cps(device, kernel_name + "_simd", metal_constants, kernel_threads);
     }
 
     void run(MTL::CommandQueue *command_queue, MTL::Buffer *mat_in, MTL::Buffer *mat_out) {
-        std::vector<MTL::Buffer *> buffers{args, mat_in, mtl_for_tensor(t_weights_bias), mat_out};
-        launch_kernel(conv_cps, command_queue, buffers, {}, kernel_thread_groups,
-                      kernel_simd_groups * 32);
+        for (const auto &args : m_args) {
+            std::vector<MTL::Buffer *> buffers{args.get(), mat_in, mtl_for_tensor(t_weights_bias),
+                                               mat_out};
+            launch_kernel(conv_cps.get(), command_queue, buffers, {}, kernel_thread_groups,
+                          kernel_simd_groups * kSIMDGroupWidth);
+        }
     }
 
     void run(MTL::CommandBuffer *command_buffer, MTL::Buffer *mat_in, MTL::Buffer *mat_out) {
-        std::vector<MTL::Buffer *> buffers{args, mat_in, mtl_for_tensor(t_weights_bias), mat_out};
-        launch_kernel_no_wait(conv_cps, command_buffer, buffers, {}, kernel_thread_groups,
-                              kernel_simd_groups * 32);
+        for (const auto &args : m_args) {
+            std::vector<MTL::Buffer *> buffers{args.get(), mat_in, mtl_for_tensor(t_weights_bias),
+                                               mat_out};
+            launch_kernel_no_wait(conv_cps.get(), command_buffer, buffers, {}, kernel_thread_groups,
+                                  kernel_simd_groups * kSIMDGroupWidth);
+        }
     }
 
     void load_weights() {
@@ -166,8 +205,8 @@ struct MetalConv1dImpl : Module {
     }
 
     torch::Tensor t_weights_bias;
-    MTL::Buffer *args;
-    MTL::ComputePipelineState *conv_cps, *weights_cps;
+    std::vector<NS::SharedPtr<MTL::Buffer>> m_args;
+    NS::SharedPtr<MTL::ComputePipelineState> conv_cps, weights_cps;
     int kernel_simd_groups, kernel_thread_groups;
     int in_size, out_size, win_size, stride, chunk_size, batch_size, w_pad_rows, repeats;
 };
@@ -201,32 +240,41 @@ TORCH_MODULE(MetalLSTM);
 struct MetalBlockImpl : Module {
     MetalBlockImpl(int chunk_size_,
                    int batch_size_,
-                   const CRFModelConfig &config,
+                   const CRFModelConfig &config_,
                    int out_split_,
-                   MTL::Device *const device_)
-            : device(device_),
+                   MTL::Device *const device)
+            : m_device(device),
               in_chunk_size(chunk_size_),
-              stride(config.stride),
               batch_size(batch_size_),
-              layer_size(config.insize),
-              out_size(config.outsize),
-              conv(config.conv),
-              out_features(config.out_features),
-              stay_score(config.blank_score) {
-        command_queue = device->newCommandQueue();
+              config(config_) {
+        m_command_queue = NS::TransferPtr(m_device->newCommandQueue());
 
-        lstm_chunk_size = in_chunk_size / stride;
+        lstm_chunk_size = in_chunk_size / config.stride;
 
         // args for LSTM kernel
         {
-            std::vector<int32_t> args_lstm_{batch_size / kTileSize, lstm_chunk_size};
-            args_lstm = create_vec_buffer(device, args_lstm_);
+            // We enforce a maximum time step count for each LSTM kernel because long running
+            // kernels increase the likelihood of command buffer submission errors, of various
+            // types.  Each args buffer here is for a different time step range.
+            constexpr int kMaxTimeSteps = 20;
+            const int num_pieces = (lstm_chunk_size + kMaxTimeSteps - 1) / kMaxTimeSteps;
+            for (int i = 0; i < num_pieces; ++i) {
+                const int time_step_begin = i * kMaxTimeSteps;
+                const int time_step_end = std::min((i + 1) * kMaxTimeSteps, lstm_chunk_size);
+                std::vector<int32_t> args{batch_size / kTileSize, lstm_chunk_size, time_step_begin,
+                                          time_step_end};
+                auto args_buffer = create_vec_buffer(m_device, args);
+                m_args_lstm.push_back(args_buffer);
+            }
+            spdlog::debug("lstm_chunk_size {} => {} LSTM kernel launches", lstm_chunk_size,
+                          num_pieces);
         }
 
         // args for conversion to half
         {
-            const std::vector<int32_t> args_to_half_{in_chunk_size * batch_size};
-            args_to_half = create_vec_buffer(device, args_to_half_);
+            const std::vector<int32_t> args_to_half_{in_chunk_size * batch_size *
+                                                     config.num_features};
+            args_to_half = create_vec_buffer(m_device, args_to_half_);
         }
 
         // args for final (possibly only) linear layer kernel.
@@ -238,12 +286,12 @@ struct MetalBlockImpl : Module {
             const int32_t in_batch_tile_offset = out_batch_tiles * i;
             std::vector<int32_t> args_linear_ = {in_batch_tiles, in_batch_tile_offset,
                                                  out_batch_tiles, lstm_chunk_size};
-            args_linear.at(i) = create_vec_buffer(device, args_linear_);
+            args_linear.at(i) = create_vec_buffer(m_device, args_linear_);
         }
         args_linear2 = create_vec_buffer<int32_t>(
                 device, {out_batch_tiles, 0, out_batch_tiles, lstm_chunk_size});
 
-        switch (layer_size) {
+        switch (config.insize) {
         case 128:
             kernel_simd_groups = 16;
             break;
@@ -269,14 +317,14 @@ struct MetalBlockImpl : Module {
             kernel_simd_groups = 16;
         }
         kernel_thread_groups = get_mtl_device_core_count();
-        const int lstm_threads = kernel_simd_groups * 32;
-        lstm_cps[0] = make_cps(device, "lstm",
-                               {{"kLstmLayerSize", layer_size}, {"kLstmReversedInTime", false}},
+        const int lstm_threads = kernel_simd_groups * kSIMDGroupWidth;
+        lstm_cps[0] = make_cps(m_device, "lstm",
+                               {{"kLstmLayerSize", config.insize}, {"kLstmReversedInTime", false}},
                                lstm_threads);
-        lstm_cps[1] = make_cps(device, "lstm",
-                               {{"kLstmLayerSize", layer_size}, {"kLstmReversedInTime", true}},
+        lstm_cps[1] = make_cps(m_device, "lstm",
+                               {{"kLstmLayerSize", config.insize}, {"kLstmReversedInTime", true}},
                                lstm_threads);
-        to_half_cps = make_cps(device, "float_to_half", {});
+        to_half_cps = make_cps(m_device, "float_to_half", {});
 
         // The temp buffer used for these purposes (number of elements of `torch_dtype` in []):
         // - Store inputs converted to F16 (if torch_dtype == kF16) [in_chunk_size * batch_size]
@@ -286,21 +334,23 @@ struct MetalBlockImpl : Module {
         //   [lstm_chunk_size * batch_size * decomposition / out_split_]
         constexpr int kMaxConv2OutChannels = 16;
         int mat_temp_elems =
-                batch_size * std::max(kMaxConv2OutChannels * in_chunk_size, layer_size);
+                batch_size * std::max(kMaxConv2OutChannels * in_chunk_size, config.insize);
 
-        conv1 = register_module("conv1", MetalConv1d(1, 1, conv, 5, 1, config.clamp, in_chunk_size,
-                                                     batch_size, device));
-        conv2 = register_module("conv2", MetalConv1d(2, conv, 16, 5, 1, config.clamp, in_chunk_size,
-                                                     batch_size, device));
-        conv3 = register_module("conv3", MetalConv1d(3, 16, layer_size, 19, stride, config.clamp,
+        conv1 = register_module("conv1",
+                                MetalConv1d(1, config.num_features, config.conv, 5, 1, config.clamp,
+                                            in_chunk_size, batch_size, device));
+        conv2 = register_module("conv2", MetalConv1d(2, config.conv, 16, 5, 1, config.clamp,
                                                      in_chunk_size, batch_size, device));
-        rnn1 = register_module("rnn_1", MetalLSTM(layer_size, true, device));
-        rnn2 = register_module("rnn_2", MetalLSTM(layer_size, false, device));
-        rnn3 = register_module("rnn_3", MetalLSTM(layer_size, true, device));
-        rnn4 = register_module("rnn_4", MetalLSTM(layer_size, false, device));
-        rnn5 = register_module("rnn_5", MetalLSTM(layer_size, true, device));
+        conv3 = register_module("conv3",
+                                MetalConv1d(3, 16, config.insize, 19, config.stride, config.clamp,
+                                            in_chunk_size, batch_size, device));
+        rnn1 = register_module("rnn_1", MetalLSTM(config.insize, true, device));
+        rnn2 = register_module("rnn_2", MetalLSTM(config.insize, false, device));
+        rnn3 = register_module("rnn_3", MetalLSTM(config.insize, true, device));
+        rnn4 = register_module("rnn_4", MetalLSTM(config.insize, false, device));
+        rnn5 = register_module("rnn_5", MetalLSTM(config.insize, true, device));
 
-        const int linear_threads = kernel_simd_groups * 32;
+        const int linear_threads = kernel_simd_groups * kSIMDGroupWidth;
         // If the intermediate feature size between conv1 and conv2 is 16, then this is a v4
         // type model, where the linear layer output is clamped rather than run through tanh.
         // Otherwise the intermediate feature size is 4.
@@ -308,55 +358,57 @@ struct MetalBlockImpl : Module {
         if (config.out_features.has_value()) {
             // The linear layer is decomposed into 2 matmuls.
             const int decomposition = config.out_features.value();
-            linear1 =
-                    register_module("linear1", MetalLinear(layer_size, decomposition, config.bias));
+            linear1 = register_module("linear1",
+                                      MetalLinear(config.insize, decomposition, config.bias));
             const bool kSecondLayerBias = false;
             linear2 = register_module("linear2",
-                                      MetalLinear(decomposition, out_size, kSecondLayerBias));
+                                      MetalLinear(decomposition, config.outsize, kSecondLayerBias));
             const auto linear_constants1 = std::vector<std::tuple<std::string, MetalConstant>>(
-                    {{"kLinearInSize", layer_size},
+                    {{"kLinearInSize", config.insize},
                      {"kLinearOutSize", decomposition},
                      {"kLinearOutputScale", 1.0f},
                      {"kLinearOutputClamp", false},
                      {"kLinearOutputTanh", false},
                      {"kLinearOutputAsByte", false}});
             linear_cps[0] =
-                    make_cps(device, "linear_from_rev_lstm", linear_constants1, linear_threads);
+                    make_cps(m_device, "linear_from_rev_lstm", linear_constants1, linear_threads);
             const auto linear_constants2 = std::vector<std::tuple<std::string, MetalConstant>>(
                     {{"kLinearInSize", decomposition},
-                     {"kLinearOutSize", out_size},
+                     {"kLinearOutSize", config.outsize},
                      // Rescale from clamped [-5.0, 5.0] range to byte range.
                      {"kLinearOutputScale", 127.0f / 5.0f},
                      {"kLinearOutputClamp", true},
                      {"kLinearOutputTanh", false},
                      {"kLinearOutputAsByte", true}});
-            linear_cps[1] = make_cps(device, "linear", linear_constants2, linear_threads);
+            linear_cps[1] = make_cps(m_device, "linear", linear_constants2, linear_threads);
             mat_temp_elems = std::max(mat_temp_elems,
                                       decomposition * (batch_size / out_split_) * lstm_chunk_size);
         } else {
-            bool is_v3_model = (config.conv == 4);
+            const bool is_v3_model = (config.num_features == 1 && config.conv == 4) ||
+                                     (config.num_features == 13 && config.conv == 16);
             const auto linear_constants = std::vector<std::tuple<std::string, MetalConstant>>(
-                    {{"kLinearInSize", layer_size},
-                     {"kLinearOutSize", out_size},
-                     // If V4, rescale from clamped [-5.0, 5.0] range to byte range.
+                    {{"kLinearInSize", config.insize},
+                     {"kLinearOutSize", config.outsize},
+                     // If v4, rescale from clamped [-5.0, 5.0] range to byte range.
+                     // If v3, rescale from tanh [-1.0, 1,0] range to byte range.
                      {"kLinearOutputScale", is_v3_model ? 127.0f : (127.0f / 5.0f)},
                      {"kLinearOutputClamp", !is_v3_model},
                      {"kLinearOutputTanh", is_v3_model},
                      {"kLinearOutputAsByte", true}});
             linear_cps[0] =
-                    make_cps(device, "linear_from_rev_lstm", linear_constants, linear_threads);
+                    make_cps(m_device, "linear_from_rev_lstm", linear_constants, linear_threads);
             // Single matmul that may or may not have a bias.
             if (!config.out_features.has_value()) {
-                linear1 =
-                        register_module("linear1", MetalLinear(layer_size, out_size, config.bias));
+                linear1 = register_module("linear1",
+                                          MetalLinear(config.insize, config.outsize, config.bias));
             }
         }
 
         // This buffer is used for several layers of the model.
         mat_working_mem = create_buffer(
-                device, size_t(lstm_chunk_size + 3) * batch_size * layer_size * dtype_bytes);
-        mat_state = create_buffer(device, batch_size * layer_size * dtype_bytes);
-        mat_temp = create_buffer(device, mat_temp_elems * dtype_bytes);
+                m_device, size_t(lstm_chunk_size + 3) * batch_size * config.insize * dtype_bytes);
+        mat_state = create_buffer(m_device, batch_size * config.insize * dtype_bytes);
+        mat_temp = create_buffer(m_device, mat_temp_elems * dtype_bytes * 20 * config.num_features);
     }
 
     void load_weights() {
@@ -377,9 +429,9 @@ struct MetalBlockImpl : Module {
             }
 
             // Reshape and combine matrices into one of size {kLstmGates, 3 * layer_size + 1, layer_size}
-            t_w = t_w.reshape({kLstmGates, layer_size, layer_size}).transpose(1, 2);
-            t_u = t_u.reshape({kLstmGates, layer_size, layer_size}).transpose(1, 2);
-            t_b = t_b.reshape({kLstmGates, 1, layer_size});
+            t_w = t_w.reshape({kLstmGates, config.insize, config.insize}).transpose(1, 2);
+            t_u = t_u.reshape({kLstmGates, config.insize, config.insize}).transpose(1, 2);
+            t_b = t_b.reshape({kLstmGates, 1, config.insize});
             // For non-obvious reasons the LSTM kernel runs faster if the U and W (or _ih) matrices are
             // spaced such that there is room for one more matrix between them. t_w used twice does that.
             t_w = torch::concat({t_u, t_w, t_w, t_b}, 1);
@@ -391,7 +443,8 @@ struct MetalBlockImpl : Module {
         }
 
         // Load and prepare linear layer weights.
-        auto get_linear_weights = [](MetalLinear &linear, bool use_bias) -> MTL::Buffer * {
+        auto get_linear_weights = [](MetalLinear &linear,
+                                     bool use_bias) -> NS::SharedPtr<MTL::Buffer> {
             auto params = linear->named_parameters();
             auto t_w = *params.find("weight");
             const auto num_states = t_w.size(0);
@@ -402,57 +455,67 @@ struct MetalBlockImpl : Module {
             auto linear_w = torch::concat({t_w.transpose(0, 1), t_b.unsqueeze(0)}, 0)
                                     .contiguous()
                                     .to(torch_dtype);
-            return extract_mtl_from_tensor(linear_w);
+            return extract_mtl_from_tensor(std::move(linear_w));
         };
-        if (out_features.has_value()) {
+        if (config.out_features.has_value()) {
+            // Linear layer is decomposed into 2 matmuls. the first with a bias.
             linear_weights[0] = get_linear_weights(linear1, true);
             linear_weights[1] = get_linear_weights(linear2, false);
         } else {
-            // v3 single matrix with bias, or v4 single matrix without bias.
-            linear_weights[0] = get_linear_weights(linear1, (conv == 4));
+            linear_weights[0] = get_linear_weights(linear1, config.bias);
         }
     }
 
     // Executes the model, with the linear layer held off by linear_hold_off, if non-NULL.
+    // If CB submissions are successful, it returns the command buffer used for the linear layer
+    // and scan kernels.  If either CB is unsuccessful, it returns nullptr.
     MTL::CommandBuffer *forward_async(torch::Tensor &in,
                                       MTL::SharedEvent *const linear_hold_off_event,
-                                      int linear_hold_off_id,
+                                      uint64_t linear_hold_off_id,
+                                      int try_count,
                                       std::vector<torch::Tensor> &out) {
-        auto command_buffer = command_queue->commandBuffer();
+        auto command_buffer = m_command_queue->commandBuffer();
 
-        if (torch_dtype == torch::kF16) {
+        assert(in.dtype() == torch::kF16 || in.dtype() == torch::kF32);
+        if (in.dtype() == torch::kF32 && torch_dtype == torch::kF16) {
             // Convert input activations from float32 to float16.
-            launch_kernel_no_wait(to_half_cps, command_buffer,
-                                  {args_to_half, mtl_for_tensor(in), mat_temp}, {},
+            launch_kernel_no_wait(to_half_cps.get(), command_buffer,
+                                  {args_to_half.get(), mtl_for_tensor(in), mat_temp.get()}, {},
                                   kernel_thread_groups, 256);
-            conv1->run(command_buffer, mat_temp, mat_working_mem);
+            conv1->run(command_buffer, mat_temp.get(), mat_working_mem.get());
         } else {
-            conv1->run(command_buffer, mtl_for_tensor(in), mat_working_mem);
+            conv1->run(command_buffer, mtl_for_tensor(in), mat_working_mem.get());
         }
-        conv2->run(command_buffer, mat_working_mem, mat_temp);
-        conv3->run(command_buffer, mat_temp, mat_working_mem);
-        finishCommandBuffer("convolutions", command_buffer, 0);
-        command_buffer = command_queue->commandBuffer();
+        conv2->run(command_buffer, mat_working_mem.get(), mat_temp.get());
+        conv3->run(command_buffer, mat_temp.get(), mat_working_mem.get());
+        if (!finishCommandBuffer("convolutions", command_buffer, try_count)) {
+            return nullptr;
+        }
+        command_buffer = m_command_queue->commandBuffer();
 
         for (auto &rnn : {rnn1, rnn2, rnn3, rnn4, rnn5}) {
-            const std::vector<MTL::Buffer *> buffers{
-                    args_lstm, mat_working_mem, mtl_for_tensor(rnn->t_weights_bias), mat_state};
             const int kResBufSize = dtype_bytes * kernel_simd_groups * 2 * kTileSize * kTileSize;
             const int kOutBufSize = dtype_bytes * kernel_simd_groups * kTileSize * kTileSize;
             const std::vector<int> tg_buffer_lens{kResBufSize, kOutBufSize};
-            launch_kernel_no_wait(lstm_cps[rnn->reverse], command_buffer, buffers, tg_buffer_lens,
-                                  kernel_thread_groups, kernel_simd_groups * 32);
+            for (const auto &args_lstm : m_args_lstm) {
+                const std::vector<MTL::Buffer *> buffers{args_lstm.get(), mat_working_mem.get(),
+                                                         mtl_for_tensor(rnn->t_weights_bias),
+                                                         mat_state.get()};
+                launch_kernel_no_wait(lstm_cps[rnn->reverse].get(), command_buffer, buffers,
+                                      tg_buffer_lens, kernel_thread_groups,
+                                      kernel_simd_groups * kSIMDGroupWidth);
+            }
         }
-        finishCommandBuffer("lstm", command_buffer, 0);
-        command_buffer = command_queue->commandBuffer();
+        if (!finishCommandBuffer("lstm", command_buffer, try_count)) {
+            return nullptr;
+        }
+        command_buffer = m_command_queue->commandBuffer();
 
         // The output buffers of conv/LSTM layers are not used by the decoding, so
         // can be overwritten by subsequent batches as soon as they have been consumed by
         // the linear layer.  The output of the linear layer must be protected until
         // it has been decoded.
-        if (linear_hold_off_event != nullptr) {
-            command_buffer->encodeWait(linear_hold_off_event, linear_hold_off_id);
-        }
+        command_buffer->encodeWait(linear_hold_off_event, linear_hold_off_id);
 
         // For now the same SIMD group count, and therefore threadgroup memory buffer size, is
         // used for all linear layer kernel invocations.
@@ -463,54 +526,40 @@ struct MetalBlockImpl : Module {
         // The output of the linear layer is split into multiple buffers, each generated
         // by a separate kernel launch.
         for (int i = 0; i < out.size(); ++i) {
-            MTL::Buffer *const args_buffer = args_linear.at(i);
+            MTL::Buffer *const args_buffer = args_linear.at(i).get();
             MTL::Buffer *const out_buffer = mtl_for_tensor(out.at(i));
-            if (out_features.has_value()) {
-                launch_kernel_no_wait(linear_cps[0], command_buffer,
-                                      {args_buffer, mat_working_mem, linear_weights[0], mat_temp},
+            if (config.out_features.has_value()) {
+                launch_kernel_no_wait(linear_cps[0].get(), command_buffer,
+                                      {args_buffer, mat_working_mem.get(), linear_weights[0].get(),
+                                       mat_temp.get()},
                                       linear_tg_buffer_lens, kernel_thread_groups,
-                                      kernel_simd_groups * 32);
-                launch_kernel_no_wait(linear_cps[1], command_buffer,
-                                      {args_linear2, mat_temp, linear_weights[1], out_buffer},
-                                      linear_tg_buffer_lens, kernel_thread_groups,
-                                      kernel_simd_groups * 32);
+                                      kernel_simd_groups * kSIMDGroupWidth);
+                launch_kernel_no_wait(
+                        linear_cps[1].get(), command_buffer,
+                        {args_linear2.get(), mat_temp.get(), linear_weights[1].get(), out_buffer},
+                        linear_tg_buffer_lens, kernel_thread_groups,
+                        kernel_simd_groups * kSIMDGroupWidth);
             } else {
-                launch_kernel_no_wait(linear_cps[0], command_buffer,
-                                      {args_buffer, mat_working_mem, linear_weights[0], out_buffer},
-                                      linear_tg_buffer_lens, kernel_thread_groups,
-                                      kernel_simd_groups * 32);
+                launch_kernel_no_wait(
+                        linear_cps[0].get(), command_buffer,
+                        {args_buffer, mat_working_mem.get(), linear_weights[0].get(), out_buffer},
+                        linear_tg_buffer_lens, kernel_thread_groups,
+                        kernel_simd_groups * kSIMDGroupWidth);
             }
         }
         return command_buffer;
     }
 
-    torch::Tensor forward(torch::Tensor in) {
-        std::vector<torch::Tensor> out{torch::empty({lstm_chunk_size, batch_size, out_size})};
-        // TODO: find a more robust way of dealing with Metal kernel launch issues
-        for (int try_count = 0; try_count < 5; ++try_count) {
-            MTL::CommandBuffer *command_buffer = forward_async(in, nullptr, 0, out);
-            command_buffer->commit();
-            command_buffer->waitUntilCompleted();
-            if (command_buffer->status() == MTL::CommandBufferStatusCompleted) {
-                break;
-            }
-            using namespace std::chrono_literals;
-            std::this_thread::sleep_for(20ms);
-        }
-        return out.at(0);
-    }
-
-    MTL::Device *device;
-    MTL::CommandQueue *command_queue;
-    std::string fn[2];
-    MTL::ComputePipelineState *lstm_cps[2], *to_half_cps, *linear_cps[2];
-    MTL::Buffer *mat_working_mem, *mat_state, *mat_temp, *args_lstm, *args_to_half,
-            *linear_weights[2], *args_linear2;
-    std::vector<MTL::Buffer *> args_linear;
-    int in_chunk_size, lstm_chunk_size, stride, batch_size, layer_size, out_size, conv,
-            kernel_thread_groups, kernel_simd_groups;
-    std::optional<int> out_features;
-    float stay_score;
+    MTL::Device *m_device;
+    NS::SharedPtr<MTL::CommandQueue> m_command_queue;
+    NS::SharedPtr<MTL::ComputePipelineState> lstm_cps[2], to_half_cps, linear_cps[2];
+    NS::SharedPtr<MTL::Buffer> mat_working_mem, mat_state, mat_temp, args_to_half,
+            linear_weights[2], args_linear2;
+    // Each args buffer corresponds to a different time span of the LSTM layer.
+    std::vector<NS::SharedPtr<MTL::Buffer>> m_args_lstm;
+    std::vector<NS::SharedPtr<MTL::Buffer>> args_linear;
+    int in_chunk_size, lstm_chunk_size, batch_size, kernel_thread_groups, kernel_simd_groups;
+    CRFModelConfig config;
     MetalLSTM rnn1{nullptr}, rnn2{nullptr}, rnn3{nullptr}, rnn4{nullptr}, rnn5{nullptr};
     MetalConv1d conv1{nullptr}, conv2{nullptr}, conv3{nullptr};
     MetalLinear linear1{nullptr}, linear2{nullptr};
@@ -533,13 +582,13 @@ struct MetalModelImpl : Module {
         mtl_block->load_weights();
     }
 
-    torch::Tensor forward(torch::Tensor x) { return mtl_block->forward(x); }
-
     MTL::CommandBuffer *forward_async(torch::Tensor &in,
                                       MTL::SharedEvent *const linear_hold_off_event,
-                                      int linear_hold_off_id,
+                                      uint64_t linear_hold_off_id,
+                                      int try_count,
                                       std::vector<torch::Tensor> &out) {
-        return mtl_block->forward_async(in, linear_hold_off_event, linear_hold_off_id, out);
+        return mtl_block->forward_async(in, linear_hold_off_event, linear_hold_off_id, try_count,
+                                        out);
     }
 
     MetalBlock mtl_block{nullptr};
@@ -551,13 +600,11 @@ TORCH_MODULE(MetalModel);
 
 class MetalCaller {
 public:
-    MetalCaller(const std::filesystem::path &model_path, int chunk_size, int batch_size) {
-        // LSTM kernels, which run with the full supplied batch size, require that the batch size
-        // be an integral multiple of 48.
-        assert(batch_size % 48 == 0);
+    MetalCaller(const CRFModelConfig &model_config, int chunk_size, int batch_size)
+            : m_config(model_config) {
+        ScopedAutoReleasePool autorelease_pool;
 
-        const auto model_config = load_crf_model_config(model_path);
-        m_model_stride = static_cast<size_t>(model_config.stride);
+        m_num_input_features = model_config.num_features;
 
         m_device = get_mtl_device();
 
@@ -565,20 +612,21 @@ public:
         m_decoder_options.q_shift = model_config.qbias;
         m_decoder_options.q_scale = model_config.qscale;
 
-        // adjust chunk size to a multiple of the stride
-        chunk_size -= chunk_size % model_config.stride;
-
         // TODO -- we don't honour the config n_base
         constexpr int n_base = 4;
         m_states = pow(n_base, model_config.state_len);
 
-        m_batch_size = batch_size;
+        constexpr int MTL_CORE_BATCH_SIZE = 48;
+        m_batch_size = (batch_size == 0) ? MTL_CORE_BATCH_SIZE * get_mtl_device_core_count()
+                                         : utils::pad_to(batch_size, MTL_CORE_BATCH_SIZE);
 
         // Chunk size after decimation via convolution stride.
         m_out_chunk_size = chunk_size / model_config.stride;
+        // round chunk size down to a multiple of the stride
+        m_in_chunk_size = m_out_chunk_size * model_config.stride;
 
-        auto state_dict = load_crf_model_weights(model_path, model_config.out_features.has_value(),
-                                                 model_config.bias);
+        auto state_dict = load_crf_model_weights(
+                model_config.model_path, model_config.out_features.has_value(), model_config.bias);
 
         // Allocations beyond 4GB can fail, and the linear layer output buffer
         // hits this limit with batch sizes larger than 384 with typical
@@ -595,42 +643,37 @@ public:
         // that is an integral multiple of 48.  Since the LSTM batch size is
         // already constrained to be an integral multiple of 48, this means the
         // batch splitting factor must be an exact divisor of the batch_size / 48.
-        constexpr auto kMaxBufferSize = static_cast<int64_t>(1) << 32;
+        // On top of this, we want to restrict kernel run times, so we use a lower
+        // limit than 4 GB.
+        constexpr auto kMaxBufferSize = static_cast<int64_t>(1) << 28;
         const auto complete_linear_out_size =
-                static_cast<int64_t>(m_out_chunk_size) * static_cast<int64_t>(batch_size) *
+                static_cast<int64_t>(m_out_chunk_size) * static_cast<int64_t>(m_batch_size) *
                 static_cast<int64_t>(model_config.outsize) * sizeof(float);
-        const int num_batch_pieces = batch_size / 48;
+        const int num_batch_pieces = m_batch_size / MTL_CORE_BATCH_SIZE;
         for (m_out_split = 1; m_out_split < num_batch_pieces; ++m_out_split) {
             if (num_batch_pieces % m_out_split == 0 &&
                 complete_linear_out_size / m_out_split < kMaxBufferSize)
                 break;
         }
+        spdlog::debug("Linear layer split {}", m_out_split);
         // If we exited the loop above without breaking, then m_out_split = num_batch_pieces,
         // which satisfies the divisor criterion, and should mean small enough linear layer
         // output buffers, given other reasonable parameters.
         assert(num_batch_pieces % m_out_split == 0);
         assert(complete_linear_out_size / m_out_split < kMaxBufferSize);
-        assert(batch_size % m_out_split == 0);
-        m_out_batch_size = batch_size / m_out_split;
-        assert(m_out_batch_size % 48 == 0);
+        assert(m_batch_size % m_out_split == 0);
+        m_out_batch_size = m_batch_size / m_out_split;
+        assert(m_out_batch_size % MTL_CORE_BATCH_SIZE == 0);
 
-        m_model = nn::MetalModel(model_config, chunk_size, batch_size, m_out_split, m_device);
+        m_model = nn::MetalModel(model_config, m_in_chunk_size, m_batch_size, m_out_split,
+                                 m_device.get());
         m_model->load_state_dict(state_dict);
         m_model->eval();
 
-        m_command_queue = m_device->newCommandQueue();
-        m_mtl_event = m_device->newSharedEvent();
-        m_bwd_scan_cps = make_cps(m_device, "backward_scan", {});
-        m_fwd_scan_cps = make_cps(m_device, "forward_scan", {});
-        m_add_softmax_cps = make_cps(m_device, "add_softmax", {});
-
-        m_metal_thread.reset(new std::thread(&MetalCaller::metal_thread_fn, this));
-
-        int num_decode_threads = std::max(1, get_apple_cpu_perf_core_count() - 1);
-        m_decode_threads.reserve(num_decode_threads);
-        for (int i = 0; i < num_decode_threads; ++i) {
-            m_decode_threads.emplace_back(new std::thread(&MetalCaller::decode_thread_fn, this, i));
-        }
+        m_decode_complete_event = NS::TransferPtr(m_device->newSharedEvent());
+        m_bwd_scan_cps = make_cps(m_device.get(), "backward_scan", {});
+        m_fwd_scan_cps = make_cps(m_device.get(), "forward_scan", {});
+        m_add_softmax_cps = make_cps(m_device.get(), "add_softmax", {});
 
         int T = m_out_chunk_size;
         int C = model_config.outsize;
@@ -651,16 +694,28 @@ public:
         // fit into bytes.
         // In both cases beam search applies the same 5/127 factor to scores.
         score_scale = static_cast<float>(5.0 / 127.0);
+
+        start_threads();
+    }
+
+    void start_threads() {
+        m_metal_thread.reset(new std::thread(&MetalCaller::metal_thread_fn, this));
+
+        int num_decode_threads = std::max(1, get_apple_cpu_perf_core_count() - 1);
+        m_decode_threads.reserve(num_decode_threads);
+        for (int i = 0; i < num_decode_threads; ++i) {
+            m_decode_threads.emplace_back(new std::thread(&MetalCaller::decode_thread_fn, this, i));
+        }
     }
 
     ~MetalCaller() {
-        std::unique_lock<std::mutex> input_lock(m_input_lock);
-        m_terminate = true;
-        input_lock.unlock();
+        m_terminate.store(true);
         m_input_cv.notify_one();
         m_decode_cv.notify_all();
 
-        m_metal_thread->join();
+        if (m_metal_thread && m_metal_thread->joinable()) {
+            m_metal_thread->join();
+        }
         for (auto &thr : m_decode_threads) {
             thr->join();
         }
@@ -668,10 +723,7 @@ public:
 
     struct NNTask {
         NNTask(torch::Tensor *input_, int num_chunks_, std::vector<DecodedChunk> *out_chunks_)
-                : input(input_), out_chunks(out_chunks_), num_chunks(num_chunks_) {
-            static int run = 0;
-            run_id = run++;
-        }
+                : input(input_), out_chunks(out_chunks_), num_chunks(num_chunks_) {}
 
         torch::Tensor *input;
         std::mutex mut;
@@ -681,7 +733,8 @@ public:
         int num_chunks;
         int decode_chunks_started{0};
         int decode_chunks_finished{0};
-        int run_id;
+        // Event ID to be signalled when decoding for this task is complete, set by metal_thread_fn.
+        uint64_t decode_complete_event_id = static_cast<uint64_t>(0);
     };
 
     void call_chunks(torch::Tensor &input, int num_chunks, std::vector<DecodedChunk> &out_chunks) {
@@ -689,42 +742,70 @@ public:
             return;
         }
 
-        NNTask task(&input, num_chunks, &out_chunks);
+        auto task = std::make_shared<NNTask>(&input, num_chunks, &out_chunks);
         {
             std::lock_guard<std::mutex> lock(m_input_lock);
-            m_input_queue.push_front(&task);
+            m_input_queue.push_front(task);
         }
         m_input_cv.notify_one();
 
-        std::unique_lock lock(task.mut);
-        while (task.decode_chunks_finished != num_chunks) {
-            task.cv.wait(lock);
+        std::unique_lock lock(task->mut);
+        while (task->decode_chunks_finished != num_chunks) {
+            task->cv.wait(lock);
         }
     }
 
     void metal_thread_fn() {
+        torch::InferenceMode inference_mode_guard;
+        ScopedAutoReleasePool autorelease_pool;
+
+        // Incrementing ID used to prevent the linear layer of run i+1 overwriting the scores of
+        // run i before the CPU has finished decoding all run i's chunks.
+        // Start at 1, since at event creation ID 0 is deemed to have been signalled.
+        auto next_decode_complete_event_id = static_cast<uint64_t>(1);
+
+        // For unknown reasons, concurrent access to the GPU from multiple instances of this thread --
+        // i.e. with > 1 instance of MetalCaller -- results in errors, usually command buffer error code 1.
+        // Holding this mutex while executing models seemingly prevents these errors.
+        static std::mutex inter_caller_mutex;
+
         while (true) {
             std::unique_lock<std::mutex> input_lock(m_input_lock);
-            while (m_input_queue.empty() && !m_terminate) {
+            while (m_input_queue.empty() && !m_terminate.load()) {
                 m_input_cv.wait_for(input_lock, 100ms);
             }
-            // TODO: finish work before terminating?
-            if (m_terminate) {
+
+            if (m_input_queue.empty() && m_terminate.load()) {
+                m_terminate_decode.store(true);
                 return;
             }
 
-            NNTask *task = m_input_queue.back();
+            auto task = std::move(m_input_queue.back());
             m_input_queue.pop_back();
             input_lock.unlock();
 
+            // Assign this task a unique decode completion event ID.
+            // This ID will be signalled by the CPU once it has finished relevant decoding work,
+            // allowing the GPU to proceed.
+            task->decode_complete_event_id = next_decode_complete_event_id++;
+
+            // We retry the entire set of kernels up to 5 times, to deal with seemingly
+            // random intermittent errors with command buffer submissions.
             // TODO: find a more robust way of dealing with Metal kernel launch issues
+            bool cb_success = false;
             for (int try_count = 0; try_count < 5; ++try_count) {
+                std::lock_guard<std::mutex> lock(inter_caller_mutex);
+
                 // The linear layer should not execute until the previous batch has been decoded,
                 // since the same buffers are used for successive batches' scores, fwd/bwd scans.
-                MTL::SharedEvent *const linear_hold_off =
-                        (task->run_id != 0) ? m_mtl_event : nullptr;
-                MTL::CommandBuffer *cb = m_model->forward_async(*task->input, linear_hold_off,
-                                                                task->run_id - 1, m_scores_int8);
+                MTL::CommandBuffer *const cb = m_model->forward_async(
+                        *task->input, m_decode_complete_event.get(),
+                        task->decode_complete_event_id - 1, try_count, m_scores_int8);
+                if (cb == nullptr) {
+                    // A command buffer submission part of forward_async failed, so we should retry.
+                    std::this_thread::sleep_for(20ms);
+                    continue;
+                }
 
                 // The same buffer is used for the forward scan results and the output of
                 // m_add_softmax_cps.
@@ -732,29 +813,38 @@ public:
                 // This stage is operating on the split outputs of the linear layer, so
                 // the effective batch size is m_out_batch_size.
                 std::vector<int32_t> scan_args_{m_out_chunk_size, m_out_batch_size, m_states};
-                auto scan_args = create_vec_buffer(m_device, scan_args_);
+                auto scan_args = create_vec_buffer(m_device.get(), scan_args_);
 
                 for (int i = 0; i < m_out_split; ++i) {
                     // TODO: optimise grid size
-                    launch_kernel_no_wait(m_fwd_scan_cps, cb,
-                                          {scan_args, mtl_for_tensor(m_scores_int8.at(i)),
+                    launch_kernel_no_wait(m_fwd_scan_cps.get(), cb,
+                                          {scan_args.get(), mtl_for_tensor(m_scores_int8.at(i)),
                                            mtl_for_tensor(fwd.at(i))},
                                           {}, m_out_batch_size, m_states);
 
-                    launch_kernel_no_wait(m_bwd_scan_cps, cb,
-                                          {scan_args, mtl_for_tensor(m_scores_int8.at(i)),
+                    launch_kernel_no_wait(m_bwd_scan_cps.get(), cb,
+                                          {scan_args.get(), mtl_for_tensor(m_scores_int8.at(i)),
                                            mtl_for_tensor(m_bwd.at(i))},
                                           {}, m_out_batch_size, m_states);
 
-                    launch_kernel_no_wait(
-                            m_add_softmax_cps, cb,
-                            {scan_args, mtl_for_tensor(fwd.at(i)), mtl_for_tensor(m_bwd.at(i))}, {},
-                            m_out_batch_size, m_states);
+                    launch_kernel_no_wait(m_add_softmax_cps.get(), cb,
+                                          {scan_args.get(), mtl_for_tensor(fwd.at(i)),
+                                           mtl_for_tensor(m_bwd.at(i))},
+                                          {}, m_out_batch_size, m_states);
                 }
                 if (finishCommandBuffer("linear/scan/softmax", cb, try_count)) {
+                    cb_success = true;
                     break;
                 }
+
+                // linear/scan/softmax CB failed, so retry.
                 std::this_thread::sleep_for(20ms);
+            }
+
+            // If we repeatedly submitted CBs without success, we give up.
+            if (!cb_success) {
+                spdlog::critical("Failed to successfully submit GPU command buffers.");
+                throw std::runtime_error("Failed to successfully submit GPU command buffers.");
             }
 
             // Pass task on to decode threads
@@ -766,16 +856,17 @@ public:
     }
 
     void decode_thread_fn(int thread_id) {
+        torch::InferenceMode inference_mode_guard;
         while (true) {
             std::unique_lock<std::mutex> decode_lock(m_decode_lock);
-            while (m_decode_queue.empty() && !m_terminate) {
+            while (m_decode_queue.empty() && !m_terminate_decode.load()) {
                 m_decode_cv.wait_for(decode_lock, 100ms);
             }
-            // TODO: finish work before terminating?
-            if (m_terminate) {
+
+            if (m_decode_queue.empty() && m_terminate_decode.load()) {
                 return;
             }
-            NNTask *task = m_decode_queue.back();
+            auto task = m_decode_queue.back();
             int chunk_idx = task->decode_chunks_started++;
             // If all chunks have been picked up for decoding, remove task from queue
             if (chunk_idx == task->num_chunks - 1) {
@@ -804,15 +895,45 @@ public:
             bool done = ++(task->decode_chunks_finished) == task->num_chunks;
             task_lock.unlock();
             if (done) {
-                m_mtl_event->setSignaledValue(task->run_id);
+                // Now that all chunks are decoded, signal that the GPU can overwrite the scores
+                // buffer with subsequent work.
+                assert(m_decode_complete_event);
+                m_decode_complete_event->setSignaledValue(task->decode_complete_event_id);
                 task->cv.notify_one();
             }
         }
     }
 
-    bool m_terminate{false};
-    std::deque<NNTask *> m_input_queue;
-    std::deque<NNTask *> m_decode_queue;
+    void terminate() {
+        m_terminate.store(true);
+        m_input_cv.notify_one();
+        m_decode_cv.notify_all();
+        if (m_metal_thread && m_metal_thread->joinable()) {
+            m_metal_thread->join();
+        }
+        m_metal_thread.reset();
+        for (auto &thr : m_decode_threads) {
+            if (thr->joinable()) {
+                thr->join();
+            }
+        }
+        m_decode_threads.clear();
+    }
+
+    void restart() {
+        // This can be called more than one, via multiple runners.
+        if (m_terminate.load()) {
+            m_terminate.store(false);
+            m_terminate_decode.store(false);
+            start_threads();
+        }
+    }
+
+    const CRFModelConfig m_config;
+    std::atomic<bool> m_terminate{false};
+    std::atomic<bool> m_terminate_decode{false};
+    std::deque<std::shared_ptr<NNTask>> m_input_queue;
+    std::deque<std::shared_ptr<NNTask>> m_decode_queue;
     std::mutex m_input_lock;
     std::condition_variable m_input_cv;
     std::unique_ptr<std::thread> m_metal_thread;
@@ -821,48 +942,70 @@ public:
     std::vector<std::unique_ptr<std::thread>> m_decode_threads;
     DecoderOptions m_decoder_options;
     nn::MetalModel m_model{nullptr};
-    MTL::Device *m_device;
-    MTL::CommandQueue *m_command_queue;
-    MTL::ComputePipelineState *m_bwd_scan_cps, *m_fwd_scan_cps, *m_add_softmax_cps;
-    MTL::SharedEvent *m_mtl_event;
+    NS::SharedPtr<MTL::Device> m_device;
+    NS::SharedPtr<MTL::ComputePipelineState> m_bwd_scan_cps, m_fwd_scan_cps, m_add_softmax_cps;
+    // Used to signal completion of an NNTask's decoding.
+    NS::SharedPtr<MTL::SharedEvent> m_decode_complete_event;
     std::vector<torch::Tensor> m_scores_int8, m_posts, m_bwd;
-    int m_out_chunk_size, m_batch_size, m_states, m_model_stride;
+    int m_in_chunk_size, m_out_chunk_size, m_batch_size, m_states;
     // Number of pieces the linear output is split into, for reasons of
     // buffer size constraints.
     int m_out_split;
     int m_out_batch_size;
     // v3 and v4 models have different score scaling requirements.
     float score_scale{0.0f};
+    // Chunk input channel count.
+    int m_num_input_features = -1;
 };
 
-std::shared_ptr<MetalCaller> create_metal_caller(const std::filesystem::path &model_path,
+std::shared_ptr<MetalCaller> create_metal_caller(const CRFModelConfig &model_config,
                                                  int chunk_size,
                                                  int batch_size) {
-    return std::make_shared<MetalCaller>(model_path, chunk_size, batch_size);
+    return std::make_shared<MetalCaller>(model_config, chunk_size, batch_size);
 }
 
-MetalModelRunner::MetalModelRunner(std::shared_ptr<MetalCaller> caller,
-                                   int chunk_size,
-                                   int batch_size)
-        : m_caller(caller) {
-    // adjust chunk size to be a multiple of the stride
-    chunk_size -= chunk_size % model_stride();
-
-    m_input = torch::empty({batch_size, 1, chunk_size},
-                           torch::TensorOptions().dtype(torch::kF32).device(torch::kCPU));
+MetalModelRunner::MetalModelRunner(std::shared_ptr<MetalCaller> caller) : m_caller(caller) {
+    // Metal convolution kernels operate with channel ordering (N, T, C).  If m_input
+    // is to be submitted directly then it must also have this arrangement.
+    // Note that this is not the same as other caller implementations, which
+    // have T innermost.
+    m_input = torch::empty(
+            {caller->m_batch_size, caller->m_in_chunk_size, caller->m_num_input_features},
+            torch::kF16);
 }
 
-void MetalModelRunner::accept_chunk(int chunk_idx, at::Tensor slice) {
-    m_input.index_put_({chunk_idx, 0}, slice);
+void MetalModelRunner::accept_chunk(int chunk_idx, const torch::Tensor &chunk) {
+    if (chunk.dim() == 1) {
+        // Input has single feature dimension.
+        assert(m_caller->m_num_input_features == 1);
+        m_input.index_put_({chunk_idx, Ellipsis, 0}, chunk);
+    } else {
+        // Chunks are passed with timestep the innermost dimension, whereas we need
+        // channels innermost.
+        assert(m_caller->m_num_input_features == chunk.size(0));
+        m_input.index_put_({chunk_idx, Ellipsis, Ellipsis}, chunk.transpose(0, 1));
+    }
 }
 
 std::vector<DecodedChunk> MetalModelRunner::call_chunks(int num_chunks) {
+    ++m_num_batches_called;
     std::vector<DecodedChunk> out_chunks(num_chunks);
     m_caller->call_chunks(m_input, num_chunks, out_chunks);
     return out_chunks;
 }
 
-size_t MetalModelRunner::model_stride() const { return m_caller->m_model_stride; }
-size_t MetalModelRunner::chunk_size() const { return m_input.size(2); }
+const CRFModelConfig &MetalModelRunner::config() const { return m_caller->m_config; }
+size_t MetalModelRunner::model_stride() const { return m_caller->m_config.stride; }
+size_t MetalModelRunner::chunk_size() const { return m_input.size(1); }
+size_t MetalModelRunner::batch_size() const { return m_input.size(0); }
+
+void MetalModelRunner::terminate() { m_caller->terminate(); }
+void MetalModelRunner::restart() { m_caller->restart(); }
+
+stats::NamedStats MetalModelRunner::sample_stats() const {
+    stats::NamedStats stats;
+    stats["batches_called"] = m_num_batches_called;
+    return stats;
+}
 
 }  // namespace dorado

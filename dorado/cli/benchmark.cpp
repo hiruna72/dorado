@@ -1,8 +1,8 @@
 #include "../utils/tensor_utils.h"
 #include "Version.h"
-#include "torch/torch.h"
 
 #include <argparse.hpp>
+#include <torch/torch.h>
 
 #include <chrono>
 #include <iostream>
@@ -10,7 +10,7 @@
 namespace dorado {
 
 int benchmark(int argc, char* argv[]) {
-    argparse::ArgumentParser parser("dorado", DORADO_VERSION);
+    argparse::ArgumentParser parser("dorado", DORADO_VERSION, argparse::default_arguments::help);
 
     try {
         parser.parse_args(argc, argv);

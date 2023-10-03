@@ -37,3 +37,12 @@
 [submodule "dorado/3rdparty/slow5lib"]
 	path = dorado/3rdparty/slow5lib
 	url = https://github.com/hasindu2008/slow5lib.git
+[submodule "dorado/3rdparty/indicators"]
+	path = dorado/3rdparty/indicators
+	url = https://github.com/p-ranav/indicators.git
+[submodule "dorado/3rdparty/ont-minimap2"]
+	path = dorado/3rdparty/ont-minimap2
+	url = https://github.com/nanoporetech/ont-minimap2.git
+[submodule "dorado/3rdparty/date"]
+	path = dorado/3rdparty/date
+	url = https://github.com/HowardHinnant/date.git

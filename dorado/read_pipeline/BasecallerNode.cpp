@@ -1,7 +1,8 @@
 #include "BasecallerNode.h"
 
 #include "../decode/CPUDecoder.h"
-#include "../utils/stitch.h"
+#include "utils/stats.h"
+#include "utils/stitch.h"
 
 #include <nvtx3/nvtx3.hpp>
 
@@ -9,47 +10,38 @@
 #include <cstdlib>
 #include <memory>
 
+#if defined(__APPLE__) && !defined(__x86_64__)
+#include "utils/metal_utils.h"
+#endif
+
 using namespace std::chrono_literals;
 using namespace torch::indexing;
 
 namespace dorado {
 
-constexpr auto FORCE_TIMEOUT = 100ms;
-
 void BasecallerNode::input_worker_thread() {
-    while (true) {
-        // Allow 5 batches per model runner on the chunks_in queue
-        size_t max_chunks_in = m_batch_size * m_num_active_model_runners * 5;
+    torch::InferenceMode inference_mode_guard;
 
-        // Wait until we are provided with a read
-        std::unique_lock<std::mutex> reads_lock(m_cv_mutex);
-        m_cv.wait_for(reads_lock, 10ms, [this] { return (!m_reads.empty()); });
-
-        if (m_reads.empty()) {
-            if (m_terminate) {
-                // Notify the basecaller threads that it is safe to gracefully terminate the basecaller
-                m_terminate_basecaller = true;
-                return;
-            } else {
-                continue;
-            }
+    Message message;
+    while (get_input_message(message)) {
+        // If this message isn't a read, just forward it to the sink.
+        if (!std::holds_alternative<std::shared_ptr<Read>>(message)) {
+            send_message_to_sink(std::move(message));
+            continue;
         }
 
-        std::shared_ptr<Read> read = m_reads.front();
-        m_reads.pop_front();
-        reads_lock.unlock();
-
-        // Now that we have acquired a read and released the reads mutex, wait until we can push to chunks_in
+        // If this message isn't a read, we'll get a bad_variant_access exception.
+        auto read = std::get<std::shared_ptr<Read>>(message);
+        // If a read has already been basecalled, just send it to the sink without basecalling again
+        // TODO: This is necessary because some reads (e.g failed Stereo Encoding) will be passed
+        // to the basecaller node having already been called. This should be fixed in the future with
+        // support for graphs of nodes rather than linear pipelines.
+        if (!read->seq.empty()) {
+            send_message_to_sink(std::move(read));
+            continue;
+        }
+        // Now that we have acquired a read, wait until we can push to chunks_in
         while (true) {
-            std::unique_lock<std::mutex> chunk_lock(m_chunks_in_mutex);
-            m_chunks_in_has_space_cv.wait_for(chunk_lock, 10ms, [this, &max_chunks_in] {
-                return (m_chunks_in.size() < max_chunks_in);
-            });
-
-            if (m_chunks_in.size() > max_chunks_in) {
-                continue;
-            }
-
             // Chunk up the read and put the chunks into the pending chunk list.
             size_t raw_size =
                     read->raw_data.sizes()[read->raw_data.sizes().size() - 1];  // Time dimension.
@@ -57,7 +49,8 @@ void BasecallerNode::input_worker_thread() {
             size_t offset = 0;
             size_t chunk_in_read_idx = 0;
             size_t signal_chunk_step = m_chunk_size - m_overlap;
-            m_chunks_in.push_back(
+            std::vector<std::shared_ptr<Chunk>> read_chunks;
+            read_chunks.push_back(
                     std::make_shared<Chunk>(read, offset, chunk_in_read_idx++, m_chunk_size));
             read->num_chunks = 1;
             auto last_chunk_offset = raw_size - m_chunk_size;
@@ -68,27 +61,38 @@ void BasecallerNode::input_worker_thread() {
             }
             while (offset + m_chunk_size < raw_size) {
                 offset = std::min(offset + signal_chunk_step, last_chunk_offset);
-                m_chunks_in.push_back(
+                read_chunks.push_back(
                         std::make_shared<Chunk>(read, offset, chunk_in_read_idx++, m_chunk_size));
                 read->num_chunks++;
             }
             read->called_chunks.resize(read->num_chunks);
             read->num_chunks_called.store(0);
-            chunk_lock.unlock();
 
             // Put the read in the working list
-            std::unique_lock<std::mutex> working_reads_lock(m_working_reads_mutex);
-            m_working_reads.push_back(read);
-            working_reads_lock.unlock();
+            {
+                std::lock_guard working_reads_lock(m_working_reads_mutex);
+                m_working_reads.insert(std::move(read));
+                ++m_working_reads_size;
+            }
+
+            for (auto &chunk : read_chunks) {
+                m_chunks_in.try_push(std::move(chunk));
+            }
+
             break;  // Go back to watching the input reads
         }
     }
+
+    // Notify the basecaller threads that it is safe to gracefully terminate the basecaller
+    m_chunks_in.terminate();
 }
 
 void BasecallerNode::basecall_current_batch(int worker_id) {
     NVTX3_FUNC_RANGE();
     auto model_runner = m_model_runners[worker_id];
+    dorado::stats::Timer timer;
     auto decode_results = model_runner->call_chunks(m_batched_chunks[worker_id].size());
+    m_call_chunks_ms += timer.GetElapsedMS();
 
     for (size_t i = 0; i < m_batched_chunks[worker_id].size(); i++) {
         m_batched_chunks[worker_id][i]->seq = decode_results[i].sequence;
@@ -96,95 +100,82 @@ void BasecallerNode::basecall_current_batch(int worker_id) {
         m_batched_chunks[worker_id][i]->moves = decode_results[i].moves;
     }
 
-    // We need to assign each chunk back to the read it came from
     for (auto &complete_chunk : m_batched_chunks[worker_id]) {
-        std::shared_ptr<Read> source_read = complete_chunk->source_read.lock();
-        source_read->called_chunks[complete_chunk->idx_in_read] = complete_chunk;
-        source_read->num_chunks_called += 1;
+        m_processed_chunks.try_push(std::move(complete_chunk));
     }
+
     m_batched_chunks[worker_id].clear();
+    ++m_num_batches_called;
 }
 
 void BasecallerNode::working_reads_manager() {
-    while (!m_terminate_manager || !m_working_reads.empty()) {
+    torch::InferenceMode inference_mode_guard;
+
+    std::shared_ptr<Chunk> chunk;
+    while (m_processed_chunks.try_pop(chunk) == utils::AsyncQueueStatus::Success) {
         nvtx3::scoped_range loop{"working_reads_manager"};
-        std::deque<std::shared_ptr<Read>> completed_reads;
-        std::unique_lock<std::mutex> working_reads_lock(m_working_reads_mutex);
 
-        for (auto read_iter = m_working_reads.begin(); read_iter != m_working_reads.end();) {
-            if ((*read_iter)->num_chunks_called.load() == (*read_iter)->num_chunks) {
-                (*read_iter)->model_name =
-                        m_model_name;  // Before sending read to sink, assign its model name
-                completed_reads.push_back(*read_iter);
-                read_iter = m_working_reads.erase(read_iter);
-            } else {
-                read_iter++;
+        auto source_read = chunk->source_read.lock();
+        source_read->called_chunks[chunk->idx_in_read] = chunk;
+        auto num_chunks_called = ++source_read->num_chunks_called;
+        if (num_chunks_called == source_read->num_chunks) {
+            utils::stitch_chunks(source_read);
+            ++m_called_reads_pushed;
+            m_num_bases_processed += source_read->seq.length();
+            m_num_samples_processed += source_read->raw_data.size(0);
+
+            std::shared_ptr<Read> found_read;
+            {
+                std::unique_lock<std::mutex> working_reads_lock(m_working_reads_mutex);
+                auto read_iter = m_working_reads.find(source_read);
+                if (read_iter != m_working_reads.end()) {
+                    (*read_iter)->model_name = m_model_name;
+                    (*read_iter)->mean_qscore_start_pos = m_mean_qscore_start_pos;
+                    found_read = std::move(*read_iter);
+                    m_working_reads.erase(read_iter);
+                    --m_working_reads_size;
+                } else {
+                    throw std::runtime_error("Expected to find read id " + source_read->read_id +
+                                             " in working reads cache but it doesn't exist.");
+                }
             }
-        }
-
-        working_reads_lock.unlock();
-
-        if (completed_reads.empty()) {
-            std::this_thread::sleep_for(10ms);
-        }
-
-        for (auto &read : completed_reads) {
-            utils::stitch_chunks(read);
-            m_sink.push_read(read);
+            send_message_to_sink(std::move(found_read));
         }
     }
-
-    m_sink.terminate();
 }
 
 void BasecallerNode::basecall_worker_thread(int worker_id) {
+#if defined(__APPLE__) && !defined(__x86_64__)
+    // Model execution creates GPU-related autorelease objects.
+    utils::ScopedAutoReleasePool autorelease_pool;
+#endif
+    torch::InferenceMode inference_mode_guard;
+
     auto last_chunk_reserve_time = std::chrono::system_clock::now();
+    int batch_size = m_model_runners[worker_id]->batch_size();
+    std::shared_ptr<Chunk> chunk;
     while (true) {
-        std::unique_lock<std::mutex> chunks_lock(m_chunks_in_mutex);
+        const auto pop_status = m_chunks_in.try_pop_until(
+                chunk, last_chunk_reserve_time + std::chrono::milliseconds(m_batch_timeout_ms));
 
-        if (m_chunks_in.empty()) {
-            if (m_terminate_basecaller) {
-                chunks_lock.unlock();  // Not strictly necessary
-                // We dispatch any part-full buffer here to finish basecalling.
-                if (!m_batched_chunks[worker_id].empty()) {
-                    basecall_current_batch(worker_id);
-                }
+        if (pop_status == utils::AsyncQueueStatus::Terminate) {
+            break;
+        }
 
-                if (!m_working_reads.empty()) {
-                    continue;
-                }
-
-                size_t num_remaining_runners = --m_num_active_model_runners;
-
-                if (num_remaining_runners == 0) {
-                    m_terminate_manager = true;
-                }
-
-                return;
-
-            } else {
-                // There's no chunks available to call at the moment, sleep and try again
-                chunks_lock.unlock();
-
-                auto current_time = std::chrono::system_clock::now();
-                auto delta = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        current_time - last_chunk_reserve_time);
-                if (delta > FORCE_TIMEOUT && !m_batched_chunks[worker_id].empty()) {
-                    basecall_current_batch(worker_id);
-                } else {
-                    std::this_thread::sleep_for(100ms);
-                }
-                continue;
+        if (pop_status == utils::AsyncQueueStatus::Timeout) {
+            // try_pop_until timed out without getting a new chunk.
+            if (!m_batched_chunks[worker_id].empty()) {
+                // get scores for whatever chunks are available.
+                basecall_current_batch(worker_id);
             }
+
+            last_chunk_reserve_time = std::chrono::system_clock::now();
+            continue;
         }
 
         // There's chunks to get_scores, so let's add them to our input tensor
-        while (m_batched_chunks[worker_id].size() != m_batch_size && !m_chunks_in.empty()) {
-            std::shared_ptr<Chunk> chunk = m_chunks_in.front();
-            m_chunks_in.pop_front();
-            chunks_lock.unlock();
-            m_chunks_in_has_space_cv.notify_one();
-
+        // FIXME -- it should not be possible to for this condition to be untrue.
+        if (m_batched_chunks[worker_id].size() != batch_size) {
             // Copy the chunk into the input tensor
             std::shared_ptr<Read> source_read = chunk->source_read.lock();
 
@@ -215,69 +206,143 @@ void BasecallerNode::basecall_worker_thread(int worker_id) {
             }
 
             // Insert the chunk in the input tensor
-            m_model_runners[worker_id]->accept_chunk(int(m_batched_chunks[worker_id].size()),
-                                                     input_slice);
+            m_model_runners[worker_id]->accept_chunk(
+                    static_cast<int>(m_batched_chunks[worker_id].size()), input_slice);
 
             m_batched_chunks[worker_id].push_back(chunk);
-            chunks_lock.lock();
 
             last_chunk_reserve_time = std::chrono::system_clock::now();
         }
 
-        chunks_lock.unlock();
-
-        if (m_batched_chunks[worker_id].size() == m_batch_size) {
+        if (m_batched_chunks[worker_id].size() == batch_size) {
             // Input tensor is full, let's get_scores.
             basecall_current_batch(worker_id);
         }
+        chunk.reset();
+    }
+
+    if (!m_batched_chunks[worker_id].empty()) {
+        basecall_current_batch(worker_id);
+    }
+
+    // Reduce the count of active runner threads.  If this was the last active
+    // thread also send termination signal to sink
+    int num_remaining_runners = --m_num_active_model_runners;
+    if (num_remaining_runners == 0) {
+        // runners can share a caller, so shutdown when all runners are done
+        // rather than terminating each runner as it finishes
+        for (auto &runner : m_model_runners) {
+            runner->terminate();
+        }
+        m_processed_chunks.terminate();
     }
 }
 
-BasecallerNode::BasecallerNode(ReadSink &sink,
-                               std::vector<Runner> model_runners,
-                               size_t batch_size,
-                               size_t chunk_size,
-                               size_t overlap,
-                               size_t model_stride,
-                               std::string model_name,
-                               size_t max_reads)
-        : ReadSink(max_reads),
-          m_sink(sink),
-          m_model_runners(std::move(model_runners)),
-          m_batch_size(batch_size),
-          m_chunk_size(chunk_size),
-          m_overlap(overlap),
-          m_model_stride(model_stride),
-          m_terminate_basecaller(false),
-          m_model_name(std::move(model_name)),
-          m_working_reads_manager(
-                  std::make_unique<std::thread>(&BasecallerNode::working_reads_manager, this)),
-          m_input_worker(
-                  std::make_unique<std::thread>(&BasecallerNode::input_worker_thread, this)) {
-    // Spin up the model runners:
-    m_num_active_model_runners = m_model_runners.size();
-    for (int i = 0; i < m_num_active_model_runners; i++) {
-        std::unique_ptr<std::thread> t =
-                std::make_unique<std::thread>(&BasecallerNode::basecall_worker_thread, this, i);
-        m_basecall_workers.push_back(std::move(t));
-        std::deque<std::shared_ptr<Chunk>> chunk_queue;
-        m_batched_chunks.push_back(chunk_queue);
+namespace {
+
+// Calculates the input queue size.
+size_t CalcMaxChunksIn(const std::vector<Runner> &model_runners) {
+    // Allow 5 batches per model runner on the chunks_in queue
+    size_t max_chunks_in = 0;
+    // Allows optimal batch size to be used for every GPU
+    for (auto &runner : model_runners) {
+        max_chunks_in += runner->batch_size() * 5;
     }
-    // adjust chunk size to be a multiple of the stride
-    m_chunk_size -= chunk_size % model_stride;
+    return max_chunks_in;
+}
+
+}  // namespace
+
+BasecallerNode::BasecallerNode(std::vector<Runner> model_runners,
+                               size_t overlap,
+                               int batch_timeout_ms,
+                               std::string model_name,
+                               size_t max_reads,
+                               const std::string &node_name,
+                               bool in_duplex_pipeline,
+                               uint32_t read_mean_qscore_start_pos)
+        : MessageSink(max_reads),
+          m_model_runners(std::move(model_runners)),
+          m_chunk_size(m_model_runners.front()->chunk_size()),
+          m_overlap(overlap),
+          m_model_stride(m_model_runners.front()->model_stride()),
+          m_batch_timeout_ms(batch_timeout_ms),
+          m_model_name(std::move(model_name)),
+          m_max_reads(max_reads),
+          m_in_duplex_pipeline(in_duplex_pipeline),
+          m_mean_qscore_start_pos(read_mean_qscore_start_pos),
+          m_chunks_in(CalcMaxChunksIn(m_model_runners)),
+          m_processed_chunks(CalcMaxChunksIn(m_model_runners)),
+          m_node_name(node_name) {
+    // Setup worker state
+    const size_t num_workers = m_model_runners.size();
+    m_batched_chunks.resize(num_workers);
 
     initialization_time = std::chrono::system_clock::now();
+
+    // Spin up any workers last so that we're not mutating |this| underneath them
+    start_threads();
 }
 
-BasecallerNode::~BasecallerNode() {
-    terminate();
-    m_cv.notify_one();
-    m_input_worker->join();
-    for (auto &t : m_basecall_workers) {
-        t->join();
+void BasecallerNode::start_threads() {
+    m_input_worker = std::make_unique<std::thread>([this] { input_worker_thread(); });
+    const size_t num_workers = m_model_runners.size();
+    m_working_reads_managers.resize(std::max(size_t{1}, num_workers / 2));
+    for (int i = 0; i < m_working_reads_managers.size(); i++) {
+        m_working_reads_managers[i] = std::thread([this] { working_reads_manager(); });
     }
-    m_working_reads_manager->join();
+    m_basecall_workers.resize(num_workers);
+    for (int i = 0; i < static_cast<int>(num_workers); i++) {
+        m_basecall_workers[i] = std::thread([this, i] { basecall_worker_thread(i); });
+    }
+    m_num_active_model_runners = num_workers;
+}
+
+void BasecallerNode::terminate_impl() {
+    terminate_input_queue();
+    if (m_input_worker && m_input_worker->joinable()) {
+        m_input_worker->join();
+    }
+    m_input_worker.reset();
+    for (auto &t : m_basecall_workers) {
+        if (t.joinable()) {
+            t.join();
+        }
+    }
+    m_basecall_workers.clear();
+    for (auto &t : m_working_reads_managers) {
+        if (t.joinable()) {
+            t.join();
+        }
+    }
+    m_working_reads_managers.clear();
     termination_time = std::chrono::system_clock::now();
+}
+
+void BasecallerNode::restart() {
+    for (auto &runner : m_model_runners) {
+        runner->restart();
+    }
+    restart_input_queue();
+    m_chunks_in.restart();
+    m_processed_chunks.restart();
+    start_threads();
+}
+
+stats::NamedStats BasecallerNode::sample_stats() const {
+    stats::NamedStats stats = stats::from_obj(m_work_queue);
+    for (const auto &runner : m_model_runners) {
+        const auto runner_stats = stats::from_obj(*runner);
+        stats.insert(runner_stats.begin(), runner_stats.end());
+    }
+    stats["batches_called"] = m_num_batches_called;
+    stats["partial_batches_called"] = m_num_partial_batches_called;
+    stats["call_chunks_ms"] = m_call_chunks_ms;
+    stats["called_reads_pushed"] = m_called_reads_pushed;
+    stats["working_reads_items"] = m_working_reads_size;
+    stats["bases_processed"] = m_num_bases_processed;
+    stats["samples_processed"] = m_num_samples_processed;
+    return stats;
 }
 
 }  // namespace dorado
