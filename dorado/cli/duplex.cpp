@@ -244,6 +244,9 @@ int duplex(int argc, char* argv[]) {
     parser.visible.add_argument("--reference")
             .help("Path to reference for alignment.")
             .default_value(std::string(""));
+    parser.visible.add_argument("--output-file")
+            .help("Path to output SAM/BAM file.")
+            .default_value(std::string("-"));
 
     int verbosity = 0;
     parser.visible.add_argument("-v", "--verbose")
@@ -367,14 +370,14 @@ int duplex(int argc, char* argv[]) {
         auto aligner = PipelineDescriptor::InvalidNodeHandle;
         auto converted_reads_sink = PipelineDescriptor::InvalidNodeHandle;
         if (ref.empty()) {
-            hts_writer = pipeline_desc.add_node<HtsWriter>({}, "-", output_mode, 4);
+            hts_writer = pipeline_desc.add_node<HtsWriter>({}, parser.visible.get<std::string>("--output-file"), output_mode, 4);
             converted_reads_sink = hts_writer;
         } else {
             auto options = cli::process_minimap2_arguments(parser, alignment::dflt_options);
             auto index_file_access = std::make_shared<alignment::IndexFileAccess>();
             aligner = pipeline_desc.add_node<AlignerNode>({}, index_file_access, ref, options,
                                                           std::thread::hardware_concurrency());
-            hts_writer = pipeline_desc.add_node<HtsWriter>({}, "-", output_mode, 4);
+            hts_writer = pipeline_desc.add_node<HtsWriter>({}, parser.visible.get<std::string>("--output-file"), output_mode, 4);
             pipeline_desc.add_node_sink(aligner, hts_writer);
             converted_reads_sink = aligner;
         }

@@ -50,7 +50,8 @@ using namespace std::chrono_literals;
 using namespace dorado::models;
 namespace fs = std::filesystem;
 
-void setup(std::vector<std::string> args,
+void setup(cli::ArgParser parser,
+           std::vector<std::string> args,
            const fs::path& model_path,
            const std::string& data_path,
            const std::vector<fs::path>& remora_models,
@@ -146,7 +147,7 @@ void setup(std::vector<std::string> args,
     utils::add_rg_hdr(hdr.get(), read_groups, barcode_kits, sample_sheet.get());
 
     PipelineDescriptor pipeline_desc;
-    auto hts_writer = pipeline_desc.add_node<HtsWriter>({}, "-", output_mode,
+    auto hts_writer = pipeline_desc.add_node<HtsWriter>({}, parser.visible.get<std::string>("--output-file"), output_mode,
                                                         thread_allocations.writer_threads);
     auto aligner = PipelineDescriptor::InvalidNodeHandle;
     auto current_sink_node = hts_writer;
@@ -381,6 +382,9 @@ int basecaller(int argc, char* argv[]) {
     parser.visible.add_argument("--reference")
             .help("Path to reference for alignment.")
             .default_value(std::string(""));
+    parser.visible.add_argument("--output-file")
+            .help("Path to output SAM/BAM file.")
+            .default_value(std::string("-"));
 
     parser.visible.add_argument("--kit-name")
             .help("Enable barcoding with the provided kit name. Choose from: " +
@@ -580,7 +584,7 @@ int basecaller(int argc, char* argv[]) {
     spdlog::info("> Creating basecall pipeline");
 
     try {
-        setup(args, model_path, data, mods_model_paths, parser.visible.get<std::string>("-x"),
+        setup(parser, args, model_path, data, mods_model_paths, parser.visible.get<std::string>("-x"),
               parser.visible.get<std::string>("--reference"), parser.visible.get<int>("-c"),
               parser.visible.get<int>("-o"), parser.visible.get<int>("-b"),
               default_parameters.num_runners, default_parameters.remora_batchsize,
