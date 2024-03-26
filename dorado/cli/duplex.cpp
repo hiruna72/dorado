@@ -240,6 +240,10 @@ int duplex(int argc, char* argv[]) {
             .help("Discard reads with mean Q-score below this threshold.")
             .default_value(0)
             .scan<'i', int>();
+    parser.visible.add_argument("--min-seq-len")
+            .help("Minimum length for a sequence to be outputted.")
+            .default_value(default_parameters.min_sequence_length)
+            .scan<'i', size_t>();
 
     parser.visible.add_argument("--reference")
             .help("Path to reference for alignment.")
@@ -387,7 +391,7 @@ int duplex(int argc, char* argv[]) {
         // The minimum sequence length is set to 5 to avoid issues with duplex node printing very short sequences for mismatched pairs.
         std::unordered_set<std::string> read_ids_to_filter;
         auto read_filter_node = pipeline_desc.add_node<ReadFilterNode>(
-                {duplex_read_tagger}, min_qscore, default_parameters.min_sequence_length,
+                {duplex_read_tagger}, min_qscore, parser.visible.get<size_t>("--min-seq-len"),
                 read_ids_to_filter, 5);
 
         std::unique_ptr<dorado::Pipeline> pipeline;

@@ -28,3 +28,4 @@ dorado/3rdparty/torch-*
 dorado/3rdparty/vbz_plugin
 dorado/3rdparty/zlib-1.2.*
 dna*
+test_dir/

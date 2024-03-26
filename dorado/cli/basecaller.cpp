@@ -178,7 +178,7 @@ void setup(cli::ArgParser parser,
                 std::move(custom_kit), std::move(custom_seqs));
     }
     current_sink_node = pipeline_desc.add_node<ReadFilterNode>(
-            {current_sink_node}, min_qscore, default_parameters.min_sequence_length,
+            {current_sink_node}, min_qscore, parser.visible.get<size_t>("--min-seq-len"),
             std::unordered_set<std::string>{}, thread_allocations.read_filter_threads);
 
     auto mean_qscore_start_pos = model_config.mean_qscore_start_pos;
@@ -323,6 +323,10 @@ int basecaller(int argc, char* argv[]) {
             .help("Discard reads with mean Q-score below this threshold.")
             .default_value(0)
             .scan<'i', int>();
+    parser.visible.add_argument("--min-seq-len")
+            .help("Minimum length for a sequence to be outputted.")
+            .default_value(default_parameters.min_sequence_length)
+            .scan<'i', size_t>();
 
     parser.visible.add_argument("-b", "--batchsize")
             .default_value(default_parameters.batchsize)
