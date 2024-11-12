@@ -24,6 +24,12 @@
 #include <optional>
 #include <stdexcept>
 #include <vector>
+#include <iostream>
+
+#include "slow5/slow5.h"
+#include "slow5_extra.h"
+#include "slow5_thread.h"
+#include <slow5/slow5_mt.h>
 
 namespace dorado {
 
@@ -135,6 +141,8 @@ std::vector<std::filesystem::directory_entry> filter_fast5_for_mixed_datasets(
             fast5_entries.push_back(entry);
         } else if (ext == ".pod5") {
             pod5_entries.push_back(entry);
+        } else if (ext == ".slow5" || ext == ".blow5") {
+            pod5_entries.push_back(entry);
         }
     }
 
@@ -149,7 +157,6 @@ std::vector<std::filesystem::directory_entry> filter_fast5_for_mixed_datasets(
                     f5.path().string());
         }
     }
-
     return pod5_entries;
 }
 
@@ -160,6 +167,97 @@ models::ChemistryKey get_chemistry_key(const RunInfoDictData_t* const run_info_d
     const auto key = models::ChemistryKey(fc, kit, run_info_data->sample_rate);
     return key;
 }
+
+// void dump_to_stderr(const SimplexReadPtr& simplex_read_ptr) {
+//     if (!simplex_read_ptr) {
+//         std::cerr << "Error: SimplexRead pointer is null.\n";
+//         return;
+//     }
+
+//     const auto& rc = simplex_read_ptr->read_common;
+
+//     // Dump ReadCommon members
+//     std::cerr << "Read ID: " << rc.read_id << '\n'
+//               << "Sequence: " << rc.seq << '\n'
+//               << "Qstring: " << rc.qstring << '\n'
+//               << "Run ID: " << rc.run_id << '\n'
+//               << "Flow Cell Product Code: " << rc.flow_cell_product_code << '\n'
+//               << "Flowcell ID: " << rc.flowcell_id << '\n'
+//               << "Position ID: " << rc.position_id << '\n'
+//               << "Experiment ID: " << rc.experiment_id << '\n'
+//               << "Model Name: " << rc.model_name << '\n'
+//               << "Model Stride: " << rc.model_stride << '\n'
+//               << "Start Time (ms): " << rc.start_time_ms << '\n'
+//               << "Pre-trim Sequence Length: " << rc.pre_trim_seq_length << '\n'
+//               << "Adapter Trim Interval: (" << rc.adapter_trim_interval.first << ", " << rc.adapter_trim_interval.second << ") " << '\n'
+//               << "Barcode Trim Interval: (" << rc.barcode_trim_interval.first << ", " << rc.barcode_trim_interval.second << ") " << '\n'
+//               << "Read Tag: " << rc.read_tag << '\n'
+//               << "Mean Qscore Start Pos: " << rc.mean_qscore_start_pos << '\n'
+//               << "Barcode: " << rc.barcode << '\n'
+//               << "Sample Rate: " << rc.sample_rate << '\n'
+//               << "Shift: " << rc.shift << '\n'
+//               << "Scale: " << rc.scale << '\n'
+//               << "Scaling Method: " << rc.scaling_method << '\n'
+//               << "Parent Read ID: " << rc.parent_read_id << '\n'
+//               << "Num Trimmed Samples: " << rc.num_trimmed_samples << '\n'
+//               << "Is Duplex: " << rc.is_duplex << '\n'
+//               << "Is RNA Model: " << rc.is_rna_model << '\n'
+//               << "RNA Poly Tail Length: " << rc.rna_poly_tail_length << '\n'
+//               << "RNA Adapter End Signal Pos: " << rc.rna_adapter_end_signal_pos << '\n'
+//               << "Subread ID: " << rc.subread_id << '\n'
+//               << "Split Count: " << rc.split_count << '\n'
+//               << "Split Point: " << rc.split_point << '\n'
+//               << "Model Q Bias: " << rc.model_q_bias << '\n'
+//               << "Model Q Scale: " << rc.model_q_scale << std::endl;
+
+
+//     // Dump moves, base_mod_probs, and alignment results sizes
+//     std::cerr << "Moves Size: " << rc.moves.size() << '\n'
+//               << "Base Mod Probs Size: " << rc.base_mod_probs.size() << '\n'
+//               << "Alignment Results Size: " << rc.alignment_results.size() << std::endl;
+
+//     // Dump SimplexRead members
+//     std::cerr << "Digitisation: " << simplex_read_ptr->digitisation << '\n'
+//               << "Range: " << simplex_read_ptr->range << '\n'
+//               << "Offset: " << simplex_read_ptr->offset << '\n'
+//               << "Scaling: " << simplex_read_ptr->scaling << '\n'
+//               << "Start Sample: " << simplex_read_ptr->start_sample << '\n'
+//               << "End Sample: " << simplex_read_ptr->end_sample << '\n'
+//               << "Run Acquisition Start Time (ms): " << simplex_read_ptr->run_acquisition_start_time_ms << '\n'
+//               << "Num Duplex Candidate Pairs: " << simplex_read_ptr->num_duplex_candidate_pairs.load() << '\n'
+//               << "Is Duplex Parent: " << simplex_read_ptr->is_duplex_parent.load() << '\n'
+//               << "Previous Read: " << simplex_read_ptr->prev_read << '\n'
+//               << "Next Read: " << simplex_read_ptr->next_read << std::endl;
+    
+//         // Dump Attributes members
+//     const auto& attr = rc.attributes;
+//     std::cerr << "Mux: " << attr.mux << '\n'
+//               << "Read Number: " << attr.read_number << '\n'
+//               << "Channel Number: " << attr.channel_number << '\n'
+//               << "Start Time: " << attr.start_time << '\n'
+//               << "Fast5 Filename: " << attr.fast5_filename << '\n'
+//               << "Num Samples: " << attr.num_samples << '\n'
+//               << "Is End Reason Mux Change: " << (attr.is_end_reason_mux_change ? "true" : "false") << std::endl;
+
+    
+//     // Print raw_data tensor dimensions
+//     if (rc.raw_data.defined()) {  // Check if the tensor is initialized
+//         std::cerr << "Raw Data Dimensions: ";
+//         for (const auto& dim : rc.raw_data.sizes()) {
+//             std::cerr << dim << " ";
+//         }
+//         std::cerr << '\n';
+//     } else {
+//         std::cerr << "Raw Data: Tensor is undefined.\n";
+//     }
+
+//     // Print Chemistry and RapidChemistry enum as integers
+//     std::cerr << "Chemistry Type: " << static_cast<int>(rc.chemistry) << '\n'
+//               << "Rapid Chemistry Type: " << static_cast<int>(rc.rapid_chemistry) << std::endl;
+
+// }
+
+
 
 SimplexReadPtr process_pod5_thread_fn(
         size_t row,
@@ -267,6 +365,9 @@ SimplexReadPtr process_pod5_thread_fn(
     if (pod5_free_run_info(run_info_data) != POD5_OK) {
         spdlog::error("Failed to free run info");
     }
+
+    // dump_to_stderr(new_read);
+
     return new_read;
 }
 
@@ -363,6 +464,13 @@ void DataLoader::load_reads(const std::filesystem::path& path,
                         if (!read_ids.empty()) {
                             load_pod5_reads_from_file_by_read_ids(entry_path.string(), read_ids);
                         }
+                    } else if (ext == ".slow5" || ext == ".blow5") {
+                        auto& channel_to_read_ids =
+                                m_file_channel_read_order_map.at(entry_path.string());
+                        auto& read_ids = channel_to_read_ids[channel];
+                        if (!read_ids.empty()) {
+                            load_slow5_reads_from_file_by_read_ids(entry_path.string(), read_ids);
+                        }
                     }
                 }
                 // Erase sorted list as it's not needed anymore.
@@ -370,6 +478,7 @@ void DataLoader::load_reads(const std::filesystem::path& path,
             }
             break;
         case ReadOrder::UNRESTRICTED:
+
             for (const auto& entry : iterator) {
                 if (m_loaded_read_count == m_max_reads) {
                     break;
@@ -382,6 +491,8 @@ void DataLoader::load_reads(const std::filesystem::path& path,
                     load_fast5_reads_from_file(entry.path().string());
                 } else if (ext == ".pod5") {
                     load_pod5_reads_from_file(entry.path().string());
+                } else if (ext == ".slow5" || ext == ".blow5") {
+                    load_slow5_reads_from_file(entry.path().string());
                 }
             }
             break;
@@ -428,6 +539,23 @@ int DataLoader::get_num_reads(const std::filesystem::path& data_path,
                 H5Easy::File file(entry.path().string(), H5Easy::File::ReadOnly);
                 HighFive::Group reads = file.getGroup("/");
                 num_reads += reads.getNumberObjects();
+            } else if (ext == ".slow5" || ext == ".blow5") {
+                slow5_file_t *sp = slow5_open(entry.path().string().c_str(),"r");
+                if(sp==NULL){
+                    fprintf(stderr,"Error in opening file\n");
+                    exit(EXIT_FAILURE);
+                }
+                size_t bytes;
+                char *mem;
+                while ((mem = (char *) slow5_get_next_mem(&bytes, sp))) {
+                    free(mem);
+                    num_reads++;
+                }
+                if (slow5_errno != SLOW5_ERR_EOF) {
+                    fprintf(stderr,"Error reading the file.%s","");
+                    exit(EXIT_FAILURE);
+                }
+                slow5_close(sp);
             }
         }
     };
@@ -446,7 +574,6 @@ int DataLoader::get_num_reads(const std::filesystem::path& data_path,
                             std::inserter(final_read_list, final_read_list.begin()));
         num_reads = std::min(num_reads, final_read_list.size());
     }
-
     return int(num_reads);
 }
 
@@ -458,76 +585,122 @@ void DataLoader::load_read_channels(const std::filesystem::path& data_path,
             std::string ext = file_path.extension().string();
             std::transform(ext.begin(), ext.end(), ext.begin(),
                            [](unsigned char c) { return std::tolower(c); });
-            if (ext != ".pod5") {
-                continue;
-            }
-            pod5_init();
+            if (ext == ".pod5") {
+                pod5_init();
 
-            // Use a std::map to store by sorted channel order.
-            m_file_channel_read_order_map.emplace(file_path.string(), channel_to_read_id_t());
-            auto& channel_to_read_id = m_file_channel_read_order_map[file_path.string()];
+                // Use a std::map to store by sorted channel order.
+                m_file_channel_read_order_map.emplace(file_path.string(), channel_to_read_id_t());
+                auto& channel_to_read_id = m_file_channel_read_order_map[file_path.string()];
 
-            // Open the file ready for walking:
-            Pod5FileReader_t* file = pod5_open_file(file_path.string().c_str());
+                // Open the file ready for walking:
+                Pod5FileReader_t* file = pod5_open_file(file_path.string().c_str());
 
-            if (!file) {
-                spdlog::error("Failed to open file {}: {}", file_path.string().c_str(),
-                              pod5_get_error_string());
-                continue;
-            }
-            std::size_t batch_count = 0;
-            if (pod5_get_read_batch_count(&batch_count, file) != POD5_OK) {
-                spdlog::error("Failed to query batch count: {}", pod5_get_error_string());
-            }
-
-            for (std::size_t batch_index = 0; batch_index < batch_count; ++batch_index) {
-                Pod5ReadRecordBatch_t* batch = nullptr;
-                if (pod5_get_read_batch(&batch, file, batch_index) != POD5_OK) {
-                    spdlog::error("Failed to get batch: {}", pod5_get_error_string());
+                if (!file) {
+                    spdlog::error("Failed to open file {}: {}", file_path.string().c_str(),
+                                  pod5_get_error_string());
                     continue;
                 }
-
-                std::size_t batch_row_count = 0;
-                if (pod5_get_read_batch_row_count(&batch_row_count, batch) != POD5_OK) {
-                    spdlog::error("Failed to get batch row count");
-                    continue;
+                std::size_t batch_count = 0;
+                if (pod5_get_read_batch_count(&batch_count, file) != POD5_OK) {
+                    spdlog::error("Failed to query batch count: {}", pod5_get_error_string());
                 }
 
-                for (std::size_t row = 0; row < batch_row_count; ++row) {
-                    uint16_t read_table_version = 0;
-                    ReadBatchRowInfo_t read_data;
-                    if (pod5_get_read_batch_row_info_data(batch, row, READ_BATCH_ROW_INFO_VERSION,
-                                                          &read_data,
-                                                          &read_table_version) != POD5_OK) {
-                        spdlog::error("Failed to get read {}", row);
+                for (std::size_t batch_index = 0; batch_index < batch_count; ++batch_index) {
+                    Pod5ReadRecordBatch_t* batch = nullptr;
+                    if (pod5_get_read_batch(&batch, file, batch_index) != POD5_OK) {
+                        spdlog::error("Failed to get batch: {}", pod5_get_error_string());
                         continue;
                     }
 
-                    int channel = read_data.channel;
-
-                    // Update maximum number of channels encountered.
-                    m_max_channel = std::max(m_max_channel, channel);
-
-                    // Store the read_id in the channel's list.
-                    ReadID read_id;
-                    std::memcpy(read_id.data(), read_data.read_id, POD5_READ_ID_SIZE);
-                    channel_to_read_id[channel].push_back(read_id);
-
-                    char read_id_tmp[POD5_READ_ID_LEN];
-                    if (pod5_format_read_id(read_data.read_id, read_id_tmp) != POD5_OK) {
-                        spdlog::error("Failed to format read id");
+                    std::size_t batch_row_count = 0;
+                    if (pod5_get_read_batch_row_count(&batch_row_count, batch) != POD5_OK) {
+                        spdlog::error("Failed to get batch row count");
+                        continue;
                     }
-                    std::string rid(read_id_tmp);
-                    m_reads_by_channel[channel].push_back(
-                            {rid, read_data.well, read_data.read_number});
-                }
 
-                if (pod5_free_read_batch(batch) != POD5_OK) {
-                    spdlog::error("Failed to release batch");
+                    for (std::size_t row = 0; row < batch_row_count; ++row) {
+                        uint16_t read_table_version = 0;
+                        ReadBatchRowInfo_t read_data;
+                        if (pod5_get_read_batch_row_info_data(batch, row, READ_BATCH_ROW_INFO_VERSION,
+                                                              &read_data,
+                                                              &read_table_version) != POD5_OK) {
+                            spdlog::error("Failed to get read {}", row);
+                            continue;
+                        }
+
+                        int channel = read_data.channel;
+
+                        // Update maximum number of channels encountered.
+                        m_max_channel = std::max(m_max_channel, channel);
+
+                        // Store the read_id in the channel's list.
+                        ReadID read_id;
+                        std::memcpy(read_id.data(), read_data.read_id, POD5_READ_ID_SIZE);
+                        channel_to_read_id[channel].push_back(read_id);
+
+                        char read_id_tmp[POD5_READ_ID_LEN];
+                        if (pod5_format_read_id(read_data.read_id, read_id_tmp) != POD5_OK) {
+                            spdlog::error("Failed to format read id");
+                        }
+                        std::string rid(read_id_tmp);
+                        m_reads_by_channel[channel].push_back(
+                                {rid, read_data.well, read_data.read_number});
+                    }
+
+                    if (pod5_free_read_batch(batch) != POD5_OK) {
+                        spdlog::error("Failed to release batch");
+                    }
                 }
-            }
-            if (pod5_close_and_free_reader(file) != POD5_OK) {
-                spdlog::error("Failed to close and free POD5 reader");
+                if (pod5_close_and_free_reader(file) != POD5_OK) {
+                    spdlog::error("Failed to close and free POD5 reader");
+                }
+            } else if (ext == ".slow5" || ext == ".blow5") {
+                std::string file_path_str = file_path.string();
+                // Use a std::map to store by sorted channel order.
+                m_file_channel_read_order_map.emplace(file_path_str, channel_to_read_id_t());
+                auto& channel_to_read_id = m_file_channel_read_order_map[file_path_str];
+
+                slow5_file_t *sp = slow5_open(file_path_str.c_str(),"r");
+                if(sp==NULL){
+                    fprintf(stderr,"Error in opening file\n");
+                    exit(EXIT_FAILURE);
+                }
+                slow5_rec_t **rec = NULL;
+                int ret_batch=0;
+                int ret=0;
+
+                slow5_mt_t *mt = slow5_init_mt(slow5_threads,sp);
+                slow5_batch_t *read_batch = slow5_init_batch(slow5_batchsize);
+
+                while((ret_batch = slow5_get_next_batch(mt,read_batch,slow5_batchsize)) > 0){
+                    rec = read_batch->slow5_rec;
+                    for(int i=0;i<ret_batch;i++){
+                        uint64_t len; //length of the array
+                        char* channel_number = slow5_aux_get_string(rec[i], "channel_number", &len, &ret);
+                        if(ret!=0){
+                            fprintf(stderr,"Error in getting auxiliary attribute from the file. Error code %d\n",ret);
+                            exit(EXIT_FAILURE);
+                        }
+                        if (channel_number == NULL){ //check if the field value exists and print the value
+                            fprintf(stderr,"channel_number is missing for the record %s\n", rec[i]->read_id);
+                            exit(EXIT_FAILURE);
+                        } else{
+                            int channel = atoi(channel_number);
+                            // Update maximum number of channels encountered.
+                            m_max_channel = std::max(m_max_channel, channel);
+                            // Store the read_id in the channel's list.
+                            ReadID read_id;
+                            std::memcpy(read_id.data(), rec[i]->read_id, POD5_READ_ID_SIZE);
+                            channel_to_read_id[channel].push_back(std::move(read_id));
+                        }
+                    }
+                    if(ret_batch<slow5_batchsize){ //this indicates nothing left to read //need to handle errors
+                        break;
+                    }
+                }
+                slow5_free_batch(read_batch);
+                slow5_free_mt(mt);
+                slow5_close(sp);
             }
         }
     };
@@ -593,6 +766,88 @@ std::unordered_map<std::string, ReadGroup> DataLoader::load_read_groups(
                         spdlog::error("Failed to close and free POD5 reader");
                     }
                 }
+            } else if (ext == ".slow5" || ext == ".blow5") {
+                slow5_file_t *sp = slow5_open(entry.path().string().c_str(),"r");
+                if(sp==NULL){
+                    fprintf(stderr,"Error in opening file\n");
+                    exit(EXIT_FAILURE);
+                }
+                int64_t read_group_count = sp->header->num_read_groups;
+                for(int64_t j=0; j<read_group_count; j++){
+                    char* run_id_c = slow5_hdr_get("run_id", j, sp->header);
+                    std::string run_id = "";
+                    if(!run_id_c){
+                        fprintf(stderr,"No run_id found in %s. (%s)\n", entry.path().string().c_str(), "DataLoader::load_read_groups");
+                        exit(EXIT_FAILURE);
+                    } else{
+                        run_id = std::string(run_id_c);
+                    }
+                    char* flow_cell_id_c = slow5_hdr_get("flow_cell_id", j, sp->header);
+                    std::string flow_cell_id = "";
+                    if(!flow_cell_id_c){
+                        fprintf(stderr,"No flowcell_id found in %s. (%s)\n", entry.path().string().c_str(), "DataLoader::load_read_groups");
+                        exit(EXIT_FAILURE);
+                    } else{
+                        flow_cell_id = std::string(flow_cell_id_c);
+                    }
+                    char* device_id_c = slow5_hdr_get("device_id", j, sp->header);
+                    std::string device_id = "";
+                    if(!device_id_c){
+                        fprintf(stderr,"No device_id found in %s. (%s)\n", entry.path().string().c_str(), "DataLoader::load_read_groups");
+                        exit(EXIT_FAILURE);
+                    } else{
+                        device_id = std::string(device_id_c);
+                    }
+                    char* experiment_id_c = slow5_hdr_get("experiment_name", j, sp->header);
+                    std::string experiment_id = "";
+                    if(experiment_id_c){
+                        experiment_id = std::string(experiment_id_c);
+                        // fprintf(stderr,"No experiment_name found in %s. (%s)\n", entry.path().string().c_str(), "DataLoader::load_read_groups");
+                        // exit(EXIT_FAILURE);
+                    }
+
+                    char* exp_start_time_ms_c = slow5_hdr_get("acquisition_start_time", j, sp->header);
+                    std::string exp_start_time_ms = "";
+                    if(!exp_start_time_ms_c){
+                        exp_start_time_ms_c = slow5_hdr_get("exp_start_time", j, sp->header);
+                        if(!exp_start_time_ms_c) {
+                            fprintf(stderr, "Neither acquisition_start_time nor exp_start_time found in %s.", entry.path().string().c_str());
+                            exit(EXIT_FAILURE);
+                        }
+                    } else{
+                        exp_start_time_ms = std::string(exp_start_time_ms_c);
+                    }
+                    char* sample_id_c = slow5_hdr_get("sample_id", j, sp->header);
+                    std::string sample_id = "";
+                    if(!sample_id_c){
+                        fprintf(stderr,"No sample_id found in %s. (%s)\n", entry.path().string().c_str(), "DataLoader::load_read_groups");
+                        exit(EXIT_FAILURE);
+                    } else{
+                        sample_id = std::string(sample_id_c);
+                    }
+
+                    char* position_id_c = slow5_hdr_get("sequencer_position", j, sp->header);
+                    std::string position_id = "";
+                    if(position_id_c){
+                        position_id = std::string(position_id_c);
+                        // fprintf(stderr,"No sequencer_position found in %s. (%s)\n", entry.path().string().c_str(), "DataLoader::load_read_groups");
+                        // exit(EXIT_FAILURE);
+                    }
+
+                    std::string id = std::string(run_id).append("_").append(model_name);
+                    read_groups[id] = ReadGroup{
+                            std::move(run_id),
+                            model_name,
+                            modbase_model_names,
+                            std::move(flow_cell_id),
+                            std::move(device_id),
+                            std::move(exp_start_time_ms),
+                            std::move(sample_id),
+                            std::move(position_id),
+                            std::move(experiment_id),
+                    };
+                }
+                slow5_close(sp);
             }
         }
     };
@@ -609,7 +864,7 @@ bool DataLoader::is_read_data_present(const std::filesystem::path& data_path,
             std::string ext = std::filesystem::path(entry).extension().string();
             std::transform(ext.begin(), ext.end(), ext.begin(),
                            [](unsigned char c) { return std::tolower(c); });
-            if (ext == ".pod5" || ext == ".fast5") {
+            if (ext == ".pod5" || ext == ".fast5" || ext == ".slow5" || ext == ".blow5") {
                 return true;
             }
         }
@@ -690,6 +945,20 @@ uint16_t DataLoader::get_sample_rate(const std::filesystem::path& data_path,
                     sampling_rate_attr.read(sampling_rate);
                     sample_rate = static_cast<uint16_t>(sampling_rate);
                 }
+            } else if (ext == ".slow5" || ext == ".blow5") {
+                slow5_file_t *sp = slow5_open(file_path.c_str(),"r");
+                if(sp==NULL){
+                    fprintf(stderr,"Error in opening file\n");
+                    exit(EXIT_FAILURE);
+                }
+                slow5_rec_t *rec = NULL;
+                int ret=0;
+                while((ret = slow5_get_next(&rec,sp)) >= 0){
+                    sample_rate = rec->sampling_rate;
+                    break;
+                }
+                slow5_rec_free(rec);
+                slow5_close(sp);
             }
 
             // Break out of loop if sample rate is found.
@@ -724,56 +993,98 @@ std::set<models::ChemistryKey> DataLoader::get_sequencing_chemistries(
                 return;
             }
 
-            if (ext != ".pod5") {
-                continue;
-            }
+            if (ext == ".pod5") {
+                pod5_init();
+                // Open the file ready for walking:
+                Pod5FileReader_t* file = pod5_open_file(file_path.c_str());
 
-            pod5_init();
-            // Open the file ready for walking:
-            Pod5FileReader_t* file = pod5_open_file(file_path.c_str());
+                if (!file) {
+                    spdlog::error("Failed to open file {}: {}", file_path.c_str(),
+                                  pod5_get_error_string());
+                } else {
+                    auto free_pod5 = [&]() {
+                        if (pod5_close_and_free_reader(file) != POD5_OK) {
+                            spdlog::error("Failed to close and free POD5 reader for file {}",
+                                          file_path.c_str());
+                        }
+                    };
 
-            if (!file) {
-                spdlog::error("Failed to open file {}: {}", file_path.c_str(),
-                              pod5_get_error_string());
-            } else {
-                auto free_pod5 = [&]() {
-                    if (pod5_close_and_free_reader(file) != POD5_OK) {
-                        spdlog::error("Failed to close and free POD5 reader for file {}",
-                                      file_path.c_str());
+                    auto post = utils::PostCondition(free_pod5);
+
+                    // First get the run info count
+                    run_info_index_t run_info_count;
+                    if (pod5_get_file_run_info_count(file, &run_info_count) != POD5_OK) {
+                        spdlog::error("Failed to fetch POD5 run info count for file {} : {}",
+                                      file_path.c_str(), pod5_get_error_string());
+
+                        continue;
+                    }
+
+                    for (run_info_index_t ri_idx = 0; ri_idx < run_info_count; ri_idx++) {
+                        RunInfoDictData_t* run_info_data;
+                        if (pod5_get_file_run_info(file, ri_idx, &run_info_data) != POD5_OK) {
+                            spdlog::error(
+                                    "Failed to fetch POD5 run info dict for file {} and run info "
+                                    "index {}: {}",
+                                    file_path.c_str(), ri_idx, pod5_get_error_string());
+                        } else {
+                            const auto chemistry_key = get_chemistry_key(run_info_data);
+                            spdlog::trace("POD5: {} {}", file_path.c_str(), to_string(chemistry_key));
+                            chemistries.insert(chemistry_key);
+                        }
+                        if (pod5_free_run_info(run_info_data) != POD5_OK) {
+                            spdlog::error(
+                                    "Failed to free POD5 run info for file {} and run info index: "
+                                    "{}",
+                                    file_path.c_str(), ri_idx);
+                        }
                     }
                 };
-
-                auto post = utils::PostCondition(free_pod5);
-
-                // First get the run info count
-                run_info_index_t run_info_count;
-                if (pod5_get_file_run_info_count(file, &run_info_count) != POD5_OK) {
-                    spdlog::error("Failed to fetch POD5 run info count for file {} : {}",
-                                  file_path.c_str(), pod5_get_error_string());
-
-                    continue;
+            } else if (ext == ".slow5" || ext == ".blow5") {
+                slow5_file_t *sp = slow5_open(file_path.c_str(),"r");
+                if(sp==NULL){
+                    fprintf(stderr,"Error in opening file\n");
+                    exit(EXIT_FAILURE);
                 }
+                int64_t read_group_count = sp->header->num_read_groups;
+                for(int64_t j=0; j<read_group_count; j++){
+                    char* flow_cell_product_code_c = slow5_hdr_get("flow_cell_product_code", j, sp->header);
+                    std::string flow_cell_product_code = "";
+                    if(!flow_cell_product_code_c){
+                        fprintf(stderr,"No flow_cell_product_code found in %s. (%s)\n", file_path.c_str(), "DataLoader::get_sequencing_chemistries");
+                        exit(EXIT_FAILURE);
+                    } else{
+                        flow_cell_product_code = std::string(flow_cell_product_code_c);
+                    }
+                    char* sequencing_kit_c = slow5_hdr_get("sequencing_kit", j, sp->header);
+                    std::string sequencing_kit = "";
+                    if(!sequencing_kit_c){
+                        fprintf(stderr,"No sequencing_kit found in %s. (%s)\n", file_path.c_str(), "DataLoader::get_sequencing_chemistries");
+                        exit(EXIT_FAILURE);
+                    } else{
+                        sequencing_kit = std::string(sequencing_kit_c);
+                    }
 
-                for (run_info_index_t ri_idx = 0; ri_idx < run_info_count; ri_idx++) {
-                    RunInfoDictData_t* run_info_data;
-                    if (pod5_get_file_run_info(file, ri_idx, &run_info_data) != POD5_OK) {
-                        spdlog::error(
-                                "Failed to fetch POD5 run info dict for file {} and run info "
-                                "index {}: {}",
-                                file_path.c_str(), ri_idx, pod5_get_error_string());
-                    } else {
-                        const auto chemistry_key = get_chemistry_key(run_info_data);
-                        spdlog::trace("POD5: {} {}", file_path.c_str(), to_string(chemistry_key));
-                        chemistries.insert(chemistry_key);
+                    slow5_rec_t *rec = NULL;
+                    int ret=0;
+                    int sample_rate = 0;
+                    while((ret = slow5_get_next(&rec,sp)) >= 0){
+                        sample_rate = rec->sampling_rate;
+                        break;
                     }
-                    if (pod5_free_run_info(run_info_data) != POD5_OK) {
-                        spdlog::error(
-                                "Failed to free POD5 run info for file {} and run info index: "
-                                "{}",
-                                file_path.c_str(), ri_idx);
-                    }
+                    slow5_rec_free(rec);
+
+                    RunInfoDictData_t run_info_data;
+                    run_info_data.flow_cell_product_code = flow_cell_product_code.c_str();
+                    run_info_data.sequencing_kit = sequencing_kit.c_str();
+                    run_info_data.sample_rate = sample_rate;
+
+                    const auto chemistry_key = get_chemistry_key(&run_info_data);
+                    spdlog::trace("BLOW5/SLOW5: {} {}", file_path.c_str(), to_string(chemistry_key));
+                    chemistries.insert(chemistry_key);
                 }
-            };
+                slow5_close(sp);
+            }
         }
     };
 
@@ -1092,17 +1403,331 @@ void DataLoader::check_read(const SimplexReadPtr& read) {
     }
 }
 
+SimplexReadPtr create_read(slow5_file_t *sp, slow5_rec_t * rec, std::string m_device_, const std::unordered_map<int, std::vector<DataLoader::ReadSortInfo>>& reads_by_channel,
+        const std::unordered_map<std::string, size_t>& read_id_to_index){
+    std::vector<int16_t> tmp(rec->raw_signal, rec->raw_signal + rec->len_raw_signal);
+    char* run_id_c = slow5_hdr_get("run_id", rec->read_group, sp->header);
+    std::string run_id = "";
+    if(!run_id_c){
+        fprintf(stderr,"No run_id found in %s. (%s)\n", sp->meta.pathname, "create_read");
+        exit(EXIT_FAILURE);
+    } else{
+        run_id = std::string(run_id_c);
+    }
+    char* flow_cell_id_c = slow5_hdr_get("flow_cell_id", rec->read_group, sp->header);
+    std::string flow_cell_id = "";
+    if(!flow_cell_id_c){
+        fprintf(stderr,"No flowcell_id found in %s. (%s)\n", sp->meta.pathname, "create_read");
+        exit(EXIT_FAILURE);
+    } else{
+        flow_cell_id = std::string(flow_cell_id_c);
+    }
+    char* flow_cell_product_code_c = slow5_hdr_get("flow_cell_product_code", rec->read_group, sp->header);
+    std::string flow_cell_product_code = "";
+    if(!flow_cell_product_code_c){
+        fprintf(stderr,"No flow_cell_product_code found in %s. (%s)\n", sp->meta.pathname, "create_read");
+        exit(EXIT_FAILURE);
+    } else{
+        flow_cell_product_code = std::string(flow_cell_product_code_c);
+    }
+    char* position_id_c = slow5_hdr_get("sequencer_position", rec->read_group, sp->header);
+    std::string position_id = "";
+    if(position_id_c){
+        position_id = std::string(position_id_c);
+        // fprintf(stderr,"No sequencer_position found in %s. (%s)\n", sp->meta.pathname, "create_read");
+        // exit(EXIT_FAILURE);
+    }
+
+    char* experiment_id_c = slow5_hdr_get("experiment_name", rec->read_group, sp->header);
+    std::string experiment_id = "";
+    if(experiment_id_c){
+        experiment_id = std::string(experiment_id_c);
+        // fprintf(stderr,"No experiment_name found in %s. (%s)\n", sp->meta.pathname, "create_read");
+        // exit(EXIT_FAILURE);
+    }
+
+    char* sequencing_kit_c = slow5_hdr_get("sequencing_kit", rec->read_group, sp->header);
+    std::string sequencing_kit = "";
+    if(!sequencing_kit_c){
+        fprintf(stderr,"No sequencing_kit found in %s. (%s)\n", sp->meta.pathname, "create_read");
+        exit(EXIT_FAILURE);
+    } else{
+        sequencing_kit = std::string(sequencing_kit_c);
+    }
+    int ret = 0;
+    uint64_t start_time = slow5_aux_get_uint64(rec, "start_time", &ret);
+    if (ret != 0) {
+        throw std::runtime_error("Error in getting auxiliary attribute 'start_time' from the file.");
+    }
+    ret = 0;
+    uint32_t mux = slow5_aux_get_uint8(rec, "start_mux", &ret);
+    if (ret != 0) {
+        throw std::runtime_error("Error in getting auxiliary attribute 'start_mux' from the file.");
+    }
+    ret = 0;
+    int32_t read_number = slow5_aux_get_int32(rec, "read_number", &ret);
+    if (ret != 0) {
+        throw std::runtime_error("Error in getting auxiliary attribute 'read_number' from the file.");
+    }
+    ret = 0;
+    uint64_t len;
+    std::string channel_number_str = slow5_aux_get_string(rec, "channel_number", &len, &ret);
+    if (ret != 0) {
+        throw std::runtime_error("Error in getting auxiliary attribute 'channel_number' from the file.");
+    }
+    int32_t channel_number = static_cast<int32_t>(std::stol(channel_number_str));
+
+    char* exp_start_time_ms_c = slow5_hdr_get("acquisition_start_time", rec->read_group, sp->header);
+    std::string exp_start_time_ms = "";
+    if(!exp_start_time_ms_c){
+        exp_start_time_ms_c = slow5_hdr_get("exp_start_time", rec->read_group, sp->header);
+        if(!exp_start_time_ms_c) {
+            throw std::runtime_error("Neither acquisition_start_time nor exp_start_time found");
+        }
+    }
+    exp_start_time_ms = std::string(exp_start_time_ms_c);
+
+    auto run_acquisition_start_time_ms = utils::get_unix_time_from_string_timestamp(exp_start_time_ms);
+    auto start_time_ms = run_acquisition_start_time_ms + ((start_time * 1000) /(uint64_t)rec->sampling_rate);
+    auto start_time_str = utils::get_string_timestamp_from_unix_time(start_time_ms);
+
+    //    auto options = torch::TensorOptions().dtype(torch::kFloat32);
+    // auto options = torch::TensorOptions().dtype(torch::kInt16);
+    // new_read->raw_data = torch::from_blob(tmp.data(), tmp.size(), options).clone().to(m_device_);
+    // new_read->sample_rate = rec->sampling_rate;
+    // new_read->run_acquisition_start_time_ms = run_acquisition_start_time_ms;
+    // new_read->start_time_ms = start_time_ms;
+    // new_read->scaling = rec->range / rec->digitisation;
+    // new_read->offset = rec->offset;
+    // new_read->read_id = std::string(rec->read_id);
+    // new_read->num_trimmed_samples = 0;
+    // new_read->attributes.read_number = read_number;
+    // new_read->attributes.fast5_filename = std::string(sp->meta.pathname);
+    // new_read->attributes.mux = mux;
+    // new_read->attributes.num_samples = rec->len_raw_signal;
+    // new_read->attributes.channel_number = channel_number;
+    // new_read->attributes.start_time = start_time_str;
+    // new_read->run_id = run_id;
+    // new_read->start_sample = start_time;
+    // new_read->end_sample = start_time + rec->len_raw_signal;
+    // new_read->flowcell_id = flowcell_id;
+    // new_read->is_duplex = false;
+    // new_read->digitisation = rec->digitisation;
+    // new_read->range = rec->range;
+
+    auto new_read = std::make_unique<SimplexRead>();
+
+    auto options = at::TensorOptions().dtype(at::kShort);
+    new_read->read_common.raw_data = at::from_blob(tmp.data(), tmp.size(), options).clone().to(m_device_);
+    new_read->read_common.sample_rate = rec->sampling_rate;
+    new_read->run_acquisition_start_time_ms = run_acquisition_start_time_ms;
+    new_read->read_common.start_time_ms = start_time_ms;
+    new_read->scaling = rec->range / rec->digitisation;
+    new_read->offset = rec->offset;
+    new_read->read_common.read_id = std::string(rec->read_id);
+    new_read->read_common.num_trimmed_samples = 0;
+    new_read->read_common.attributes.read_number = read_number;
+    new_read->read_common.attributes.fast5_filename = std::string(sp->meta.pathname);
+    new_read->read_common.attributes.mux = mux;
+    new_read->read_common.attributes.num_samples = rec->len_raw_signal;
+    new_read->read_common.attributes.channel_number = channel_number;
+    new_read->read_common.attributes.start_time = start_time_str;
+    new_read->read_common.run_id = run_id;
+    new_read->start_sample = start_time;
+    new_read->end_sample = start_time + rec->len_raw_signal;
+    new_read->read_common.flowcell_id = flow_cell_id;
+    new_read->read_common.flow_cell_product_code = flow_cell_product_code;
+    new_read->read_common.position_id = position_id;
+    new_read->read_common.experiment_id = experiment_id;
+    new_read->read_common.is_duplex = false;
+
+    // Get the condition_info from the run_info_data to determine if the sequencing kit
+    // used has a rapid adapter and which one.
+
+    RunInfoDictData_t run_info_data;
+    run_info_data.flow_cell_product_code = flow_cell_product_code.c_str();
+    run_info_data.sequencing_kit = sequencing_kit.c_str();
+    run_info_data.sample_rate = rec->sampling_rate;
+
+    const auto condition_info = models::ConditionInfo(get_chemistry_key(&run_info_data));
+    new_read->read_common.rapid_chemistry = condition_info.rapid_chemistry();
+    new_read->read_common.chemistry = condition_info.chemistry();
+
+    // Determine the time sorted predecessor of the read
+    // if that information is available (primarily used for offline
+    // duplex runs).
+    if (reads_by_channel.find(channel_number) != reads_by_channel.end()) {
+        auto& read_id = new_read->read_common.read_id;
+        const auto& v = reads_by_channel.at(channel_number);
+        auto read_id_iter = v.begin() + read_id_to_index.at(read_id);
+
+        if (read_id_iter != v.begin()) {
+            new_read->prev_read = std::prev(read_id_iter)->read_id;
+        }
+        if (std::next(read_id_iter) != v.end()) {
+            new_read->next_read = std::next(read_id_iter)->read_id;
+        }
+    }
+
+    // dump_to_stderr(new_read);
+
+    return new_read;
+
+
+}
+
+void create_read_data(core_t *core, db_t *db, int32_t i) {
+    //
+    struct slow5_rec *rec = NULL;
+    if (slow5_rec_depress_parse(&db->mem_records[i], &db->mem_bytes[i], NULL, &rec, core->fp) != 0) {
+        exit(EXIT_FAILURE);
+    } else {
+        free(db->mem_records[i]);
+    }
+    auto new_read = create_read(core->fp, rec, core->m_device_, core->reads_by_channel, core->read_id_to_index);
+    //
+    // db->read_data_ptrs[i] = new_read;
+    db->read_data_ptrs[i] = std::move(new_read);
+    slow5_rec_free(rec);
+}
+
+void DataLoader::load_slow5_reads_from_file(const std::string &path) {    
+    slow5_file_t *sp = slow5_open(path.c_str(), "r");
+    if (sp == NULL) {
+        fprintf(stderr, "Error in opening file\n");
+        exit(EXIT_FAILURE);
+    }
+    int64_t batch_size = slow5_batchsize;
+    int32_t num_threads = slow5_threads;
+
+    while (1) {
+        int flag_EOF = 0;
+        db_t db = {0};
+        db.mem_records = (char **) malloc(batch_size * sizeof *db.mem_records);
+        db.mem_bytes = (size_t *) malloc(batch_size * sizeof *db.mem_bytes);
+
+        int64_t record_count = 0;
+        size_t bytes;
+        char *mem;
+        while (record_count < batch_size) {
+            if (!(mem = (char *) slow5_get_next_mem(&bytes, sp))) {
+                if (slow5_errno != SLOW5_ERR_EOF) {
+                    throw std::runtime_error("Error in slow5_get_next_mem.");
+                } else { //EOF file reached
+                    flag_EOF = 1;
+                    break;
+                }
+            } else {
+                db.mem_records[record_count] = mem;
+                db.mem_bytes[record_count] = bytes;
+                record_count++;
+            }
+        }
+
+        // Setup multithreading structures
+        core_t core = {0};
+        core.num_thread = (num_threads > record_count) ? record_count : num_threads;
+        if (record_count == 0) {
+            core.num_thread = 1;
+        }
+        core.fp = sp;
+        core.m_device_ = m_device;
+        core.reads_by_channel = std::cref(m_reads_by_channel);
+        core.read_id_to_index = std::cref(m_read_id_to_index);
+
+
+        db.n_batch = record_count;
+        db.read_data_ptrs = std::vector<dorado::SimplexReadPtr>(record_count);
+        work_db(&core, &db, create_read_data);
+
+        for (int64_t i = 0; i < record_count; i++) {
+            if (!m_allowed_read_ids ||
+                (m_allowed_read_ids->find(db.read_data_ptrs[i]->read_common.read_id) != m_allowed_read_ids->end())) {
+                initialise_read(db.read_data_ptrs[i]->read_common);
+                check_read(db.read_data_ptrs[i]);
+                m_pipeline.push_message(std::move(db.read_data_ptrs[i]));
+                m_loaded_read_count++;
+            }
+        }
+        // Free everything
+        free(db.mem_bytes);
+        free(db.mem_records);
+
+        if (flag_EOF == 1) {
+            break;
+        }
+    }
+    slow5_close(sp);
+}
+void DataLoader::load_slow5_reads_from_file_by_read_ids(const std::string &path, const std::vector<ReadID>& read_ids) {
+
+    slow5_file_t *sp = slow5_open(path.c_str(), "r");
+    if (sp == NULL) {
+        fprintf(stderr, "Error in opening file\n");
+        exit(EXIT_FAILURE);
+    }
+    slow5_rec_t **rec = NULL;
+    int ret = slow5_idx_load(sp);
+    if(ret<0){
+        fprintf(stderr,"Error in loading index\n");
+        exit(EXIT_FAILURE);
+    }
+
+    size_t num_rid = read_ids.size();
+    size_t read_count = 0;
+    char **rid = (char**)malloc(sizeof(char*)*slow5_batchsize);
+
+    while(1){
+        int local_batch_size = ((size_t)slow5_batchsize > (num_rid - read_count)) ? num_rid - read_count : (size_t)slow5_batchsize;
+        for(size_t i=0; i<(size_t)local_batch_size; i++){
+            std::string read_s(read_ids[read_count].data(), read_ids[read_count].data()+POD5_READ_ID_SIZE);
+            rid[i] = strdup(read_s.c_str());
+            read_count++;
+        }
+        ret = slow5_get_batch_lazy(&rec, sp, rid, local_batch_size, slow5_threads);
+        assert(ret==local_batch_size);
+        for(int i=0;i<ret;i++){
+            if (!m_allowed_read_ids ||
+                (m_allowed_read_ids->find(std::string(rec[i]->read_id)) != m_allowed_read_ids->end())) {
+                auto new_read = create_read(sp, rec[i], m_device, std::cref(m_reads_by_channel), std::cref(m_read_id_to_index));
+                spdlog::debug("read_id queued: {}",rec[i]->read_id);
+                // m_pipeline.push_message(new_read);
+                initialise_read(new_read->read_common);
+                check_read(new_read);
+                m_pipeline.push_message(std::move(new_read));
+                m_loaded_read_count++;
+            }
+        }
+        slow5_free_batch_lazy(&rec,ret);
+        for(int i=0; i<local_batch_size; i++){
+            free(rid[i]);
+        }
+        if(local_batch_size < slow5_batchsize){
+            break;
+        }
+    }
+    free(rid);
+    slow5_idx_unload(sp);
+    slow5_close(sp);
+}
+
+
+
 DataLoader::DataLoader(Pipeline& pipeline,
                        const std::string& device,
                        size_t num_worker_threads,
                        size_t max_reads,
                        std::optional<std::unordered_set<std::string>> read_list,
-                       std::unordered_set<std::string> read_ignore_list)
+                       std::unordered_set<std::string> read_ignore_list,
+                    int32_t slow5_threads_,
+                    int64_t slow5_batchsize_)
         : m_pipeline(pipeline),
           m_device(device),
           m_num_worker_threads(num_worker_threads),
           m_allowed_read_ids(std::move(read_list)),
           m_ignored_read_ids(std::move(read_ignore_list)) {
+    slow5_threads = slow5_threads_;
+    slow5_batchsize = slow5_batchsize_;
     m_max_reads = max_reads == 0 ? std::numeric_limits<decltype(m_max_reads)>::max() : max_reads;
     assert(m_num_worker_threads > 0);
     static std::once_flag vbz_init_flag;

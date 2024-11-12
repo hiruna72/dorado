@@ -305,6 +305,14 @@ add_library(dorado_lib
     dorado/correct/CorrectionProgressTracker.h
 )
 
+function(add_slow5lib)
+    include_directories(dorado/3rdparty/slow5lib/include)
+    include_directories(dorado/3rdparty/slow5lib/src)
+    add_subdirectory(dorado/3rdparty/slow5lib)
+endfunction()
+
+add_slow5lib()
+
 enable_warnings_as_errors(dorado_lib)
 
 set_target_properties(dorado_lib
@@ -409,6 +417,8 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
     add_library(dorado_io_lib
         dorado/data_loader/DataLoader.cpp
         dorado/data_loader/DataLoader.h
+        dorado/data_loader/slow5_thread.h
+        dorado/data_loader/slow5_thread.cpp
      )
 
     target_link_libraries(dorado_io_lib
@@ -420,6 +430,7 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
             vbz_hdf_plugin
             ${CMAKE_DL_LIBS}
             ${ZLIB_LIBRARIES}
+            slow5
     )
 
     set_target_properties(dorado_io_lib

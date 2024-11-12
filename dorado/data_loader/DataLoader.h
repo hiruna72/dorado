@@ -41,11 +41,14 @@ public:
                size_t num_worker_threads,
                size_t max_reads,
                std::optional<std::unordered_set<std::string>> read_list,
-               std::unordered_set<std::string> read_ignore_list);
+               std::unordered_set<std::string> read_ignore_list,
+               int32_t slow5_threads = 8,
+               int64_t slow5_batchsize = 4000);
     ~DataLoader() = default;
     void load_reads(const std::filesystem::path& path,
                     bool recursive_file_loading,
                     ReadOrder traversal_order);
+    void dump_to_stderr(const SimplexReadPtr& simplex_read_ptr);
 
     static std::unordered_map<std::string, ReadGroup> load_read_groups(
             const std::filesystem::path& data_path,
@@ -92,6 +95,8 @@ private:
     void load_pod5_reads_from_file(const std::string& path);
     void load_pod5_reads_from_file_by_read_ids(const std::string& path,
                                                const std::vector<ReadID>& read_ids);
+    void load_slow5_reads_from_file(const std::string& path);
+    void load_slow5_reads_from_file_by_read_ids(const std::string& path, const std::vector<ReadID>& read_ids);
     void load_read_channels(const std::filesystem::path& data_path, bool recursive_file_loading);
 
     void initialise_read(ReadCommon& read) const;
@@ -115,6 +120,9 @@ private:
     void check_read(const SimplexReadPtr& read);
     // A flag to warn only once if the data chemsitry is known
     std::atomic<bool> m_log_unknown_chemistry{true};
+
+    int32_t slow5_threads{8};
+    int64_t slow5_batchsize{4000};
 };
 
 }  // namespace dorado

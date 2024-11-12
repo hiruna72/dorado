@@ -392,6 +392,16 @@ int duplex(int argc, char* argv[]) {
             .help("Path to stereo model")
             .default_value(std::string(""));
 
+    parser.visible.add_argument("--slow5_threads")
+            .default_value(default_parameters.slow5_threads)
+            .scan<'i', int32_t>()
+            .help("Number of slow5 threads used to read SLOW5/BLOW5");
+            
+    parser.visible.add_argument("--slow5_batchsize")
+            .default_value(default_parameters.slow5_batchsize)
+            .scan<'i', int64_t>()
+            .help("Batchsize used to read SLOW5/BLOW5");
+
     std::vector<std::string> args_excluding_mm2_opts{};
     auto mm2_option_string = alignment::mm2::extract_options_string_arg({argv, argv + argc},
                                                                         args_excluding_mm2_opts);
@@ -735,7 +745,9 @@ int duplex(int argc, char* argv[]) {
             }
             hts_file->set_header(hdr.get());
 
-            DataLoader loader(*pipeline, "cpu", num_devices, 0, std::move(read_list), {});
+            int32_t slow5_threads = parser.visible.get<int32_t>("--slow5_threads");
+            int64_t slow5_batchsize = parser.visible.get<int64_t>("--slow5_batchsize");
+            DataLoader loader(*pipeline, "cpu", num_devices, 0, std::move(read_list), {}, slow5_threads, slow5_batchsize);
             loader.add_read_initialiser(client_info_init_func);
 
             stats_sampler = std::make_unique<dorado::stats::StatsSampler>(
