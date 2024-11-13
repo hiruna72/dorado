@@ -44,6 +44,6 @@ jobs:
     - name: Upload the artifact
       uses: actions/upload-artifact@v3
       with:
-        name: "slow5-dorado-${CI_COMMIT_REF_NAME}-v$(basename $(find archive/ -name 'slow5-dorado-*.tar.gz') | sed 's/^slow5-dorado-\(v[0-9]*\.[0-9]*\.[0-9]*\).*/\1/')"
+        name: slow5-dorado-artifact
         path: archive/*.tar.gz
 
