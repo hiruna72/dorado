@@ -338,6 +338,7 @@ target_include_directories(dorado_lib
         ${DORADO_3RD_PARTY_SOURCE}/cxxpool/src
         ${DORADO_3RD_PARTY_SOURCE}/NVTX/c/include
         ${DORADO_3RD_PARTY_SOURCE}/indicators/include
+        ${DORADO_3RD_PARTY_SOURCE}/slow5lib/include
 )
 
 enable_testing()

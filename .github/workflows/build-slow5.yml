@@ -27,8 +27,23 @@ jobs:
     - name: Build dorado
       run: |
         cmake -S . -B cmake-build -DSLOW5_USE_ZSTD=ON -DSLOW5_LINK_STATIC=ON -DSLOW5_ENABLE_MT=ON
-        cmake --build cmake-build --config Release -j 8
+        cmake --build cmake-build --config Release -j 8 --target all
     - name: Test dorado
       run: |
         cmake --build cmake-build --config Release --target install -j 8
         ctest -C Release --test-dir cmake-build --output-on-failure --verbose
+    - name: Dorado packaging stage
+      run: |
+        cpack --config cmake-build/CPackConfig.cmake
+    
+    - name: Rename the artifact
+      run: |
+        ARTIFACT_NAME=$(ls archive/*.tar.gz)
+        mv $ARTIFACT_NAME archive/slow5-$(basename $ARTIFACT_NAME)
+    
+    - name: Upload the artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: "slow5-dorado-${CI_COMMIT_REF_NAME}-v$(basename $(find archive/ -name 'slow5-dorado-*.tar.gz') | sed 's/^slow5-dorado-\(v[0-9]*\.[0-9]*\.[0-9]*\).*/\1/')"
+        path: archive/*.tar.gz
+
