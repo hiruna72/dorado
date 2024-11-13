@@ -688,10 +688,35 @@ void DataLoader::load_read_channels(const std::filesystem::path& data_path,
                             int channel = atoi(channel_number);
                             // Update maximum number of channels encountered.
                             m_max_channel = std::max(m_max_channel, channel);
+                            
                             // Store the read_id in the channel's list.
+                            uint8_t  arr[16] = {0};
+                            ret = sscanf(rec[i]->read_id, "%2hhx%2hhx%2hhx%2hhx-%2hhx%hhx-%2hhx%2hhx-%2hhx%2hhx-%2hhx%2hhx%2hhx%2hhx%2hhx%2hhx",
+                                            &arr[0], &arr[1], &arr[2], &arr[3], &arr[4], &arr[5], &arr[6], &arr[7],
+                                            &arr[8], &arr[9], &arr[10], &arr[11], &arr[12], &arr[13], &arr[14], &arr[15]);
+                            if(ret !=16){
+                                fprintf(stderr,"Parsing uuid failed. Return val %d\n",ret);
+                                exit(1);
+                            }
+
                             ReadID read_id;
-                            std::memcpy(read_id.data(), rec[i]->read_id, POD5_READ_ID_SIZE);
+                            std::memcpy(read_id.data(), arr, POD5_READ_ID_SIZE);
                             channel_to_read_id[channel].push_back(std::move(read_id));
+
+                            std::string rid(rec[i]->read_id);
+                            ret = 0;
+                            uint32_t mux = slow5_aux_get_uint8(rec[i], "start_mux", &ret);
+                            if (ret != 0) {
+                                throw std::runtime_error("Error in getting auxiliary attribute 'start_mux' from the file.");
+                            }
+                            ret = 0;
+                            int32_t read_number = slow5_aux_get_int32(rec[i], "read_number", &ret);
+                            if (ret != 0) {
+                                throw std::runtime_error("Error in getting auxiliary attribute 'read_number' from the file.");
+                            }
+                            m_reads_by_channel[channel].push_back(
+                                    {rid, (int32_t)mux, (uint32_t)read_number});
+
                         }
                     }
                     if(ret_batch<slow5_batchsize){ //this indicates nothing left to read //need to handle errors
@@ -1680,7 +1705,12 @@ void DataLoader::load_slow5_reads_from_file_by_read_ids(const std::string &path,
     while(1){
         int local_batch_size = ((size_t)slow5_batchsize > (num_rid - read_count)) ? num_rid - read_count : (size_t)slow5_batchsize;
         for(size_t i=0; i<(size_t)local_batch_size; i++){
-            std::string read_s(read_ids[read_count].data(), read_ids[read_count].data()+POD5_READ_ID_SIZE);
+            char read_id_tmp[POD5_READ_ID_LEN];
+            if (pod5_format_read_id(read_ids[read_count].data(), read_id_tmp) != POD5_OK) {
+                spdlog::error("Failed to format read id");
+            }
+            std::string read_s(read_id_tmp);
+            
             rid[i] = strdup(read_s.c_str());
             read_count++;
         }
