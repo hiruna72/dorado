@@ -26,7 +26,7 @@ jobs:
       run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libhdf5-dev libssl-dev libzstd-dev autoconf
     - name: Build dorado
       run: |
-        cmake -S . -B cmake-build
+        cmake -S . -B cmake-build -DSLOW5_USE_ZSTD=ON -DSLOW5_LINK_STATIC=ON -DSLOW5_ENABLE_MT=ON
         cmake --build cmake-build --config Release -j 8
     - name: Test dorado
       run: |
