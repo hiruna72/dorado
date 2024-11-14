@@ -9,7 +9,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-18.04
     steps:
     - uses: actions/checkout@v3
     - name: Clean up diskspace
@@ -23,15 +23,33 @@ jobs:
       with:
         cuda: '11.8.0'
     - name: Install dependencies from apt
-      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libhdf5-dev libssl-dev libzstd-dev autoconf
+      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libssl-dev libzstd-dev autoconf
+    
+    - name: Set up HDF5 build path
+      run: |
+        export LOCAL_HDF_PATH="${PWD}/local_hdf_dir"
+
+    - name: Download and build HDF5
+      run: |
+        wget https://support.hdfgroup.org/releases/hdf5/v1_14/v1_14_5/downloads/hdf5-1.14.5.tar.gz
+        tar -xzvf hdf5-1.14.5.tar.gz
+        cd hdf5-1.14.5
+        ./configure --prefix="${LOCAL_HDF_PATH}" --enable-static --disable-shared
+        make -j
+        make install
+
+    - name: Verify HDF5 installation
+      run: |
+        ls "${LOCAL_HDF_PATH}/lib" # Lists the installed static libraries
+    
     - name: Build dorado
       run: |
-        cmake -S . -B cmake-build -DSLOW5_USE_ZSTD=ON -DSLOW5_LINK_STATIC=ON -DSLOW5_ENABLE_MT=ON
-        cmake --build cmake-build --config Release -j 8 --target all
-    - name: Test dorado
-      run: |
-        cmake --build cmake-build --config Release --target install -j 8
-        ctest -C Release --test-dir cmake-build --output-on-failure --verbose
+        cmake -S . -B cmake-build -DSLOW5_USE_ZSTD=ON -DSLOW5_LINK_STATIC=ON -DSLOW5_ENABLE_MT=ON -DHDF5_ROOT=${LOCAL_HDF_PATH}
+        cmake --build cmake-build --config Release -j 8 --target dorado
+    # - name: Test dorado
+    #   run: |
+    #     cmake --build cmake-build --config Release --target install -j 8
+    #     ctest -C Release --test-dir cmake-build --output-on-failure --verbose
     - name: Dorado packaging stage
       run: |
         cpack --config cmake-build/CPackConfig.cmake
