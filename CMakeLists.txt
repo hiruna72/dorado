@@ -3,7 +3,7 @@ set(CMAKE_POLICY_DEFAULT_CMP0063 NEW)
 set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
 set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
 
-project(dorado LANGUAGES C CXX)
+project(slow5-dorado LANGUAGES C CXX)
 if(APPLE)
   enable_language(OBJC OBJCXX)
 endif()
@@ -390,6 +390,8 @@ if(NOT DORADO_DISABLE_DORADO)
         PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
     )
+    
+    set_target_properties(dorado PROPERTIES OUTPUT_NAME "slow5-dorado")
 
     if(MSVC)
         set_property(TARGET dorado APPEND PROPERTY LINK_OPTIONS "/ignore:4099")
