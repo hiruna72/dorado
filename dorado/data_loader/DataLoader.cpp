@@ -511,74 +511,14 @@ int DataLoader::get_num_reads(const std::filesystem::path& data_path,
                               std::optional<std::unordered_set<std::string>> read_list,
                               const std::unordered_set<std::string>& ignore_read_list,
                               bool recursive_file_loading) {
-    size_t num_reads = 0;
-
-    auto iterate_directory = [&](const auto& iterator) {
-        for (const auto& entry : iterator) {
-            std::string ext = std::filesystem::path(entry).extension().string();
-            std::transform(ext.begin(), ext.end(), ext.begin(),
-                           [](unsigned char c) { return std::tolower(c); });
-            if (ext == ".pod5") {
-                pod5_init();
-
-                // Open the file ready for walking:
-                Pod5FileReader_t* file = pod5_open_file(entry.path().string().c_str());
-
-                size_t read_count;
-                pod5_get_read_count(file, &read_count);
-                if (!file) {
-                    spdlog::error("Failed to open file {}: {}", entry.path().string().c_str(),
-                                  pod5_get_error_string());
-                }
-
-                num_reads += read_count;
-                if (pod5_close_and_free_reader(file) != POD5_OK) {
-                    spdlog::error("Failed to close and free POD5 reader");
-                }
-            } else if (ext == ".fast5") {
-                H5Easy::File file(entry.path().string(), H5Easy::File::ReadOnly);
-                HighFive::Group reads = file.getGroup("/");
-                num_reads += reads.getNumberObjects();
-            } else if (ext == ".slow5" || ext == ".blow5") {
-                if(ignore_read_list.size()>0 or read_list){
-                    throw std::runtime_error("-l, --read-ids flags not supported with blow5 input");
-                }
-                num_reads++;
-                // slow5_file_t *sp = slow5_open(entry.path().string().c_str(),"r");
-                // if(sp==NULL){
-                //     fprintf(stderr,"Error in opening file\n");
-                //     exit(EXIT_FAILURE);
-                // }
-                // size_t bytes;
-                // char *mem;
-                // while ((mem = (char *) slow5_get_next_mem(&bytes, sp))) {
-                //     free(mem);
-                //     num_reads++;
-                // }
-                // if (slow5_errno != SLOW5_ERR_EOF) {
-                //     fprintf(stderr,"Error reading the file.%s","");
-                //     exit(EXIT_FAILURE);
-                // }
-                // slow5_close(sp);
-            }
-        }
-    };
-
-    iterate_directory(fetch_directory_entries(data_path, recursive_file_loading));
-
-    // Remove the reads in the ignore list from the total dataset read count.
-    num_reads -= ignore_read_list.size();
-
-    if (read_list) {
-        // Get the unique read ids in the read list, since everything in the ignore
-        // list will be skipped over.
-        std::vector<std::string> final_read_list;
-        std::set_difference(read_list->begin(), read_list->end(), ignore_read_list.begin(),
-                            ignore_read_list.end(),
-                            std::inserter(final_read_list, final_read_list.begin()));
-        num_reads = std::min(num_reads, final_read_list.size());
+    if(read_list){
+        spdlog::debug("> args to get_num_reads: {}", data_path.string());
+        spdlog::debug("> args to get_num_reads: {}",ignore_read_list.size());
+        spdlog::debug("> args to get_num_reads: {}",recursive_file_loading);
     }
-    return int(num_reads);
+    
+    return 1;
+
 }
 
 void DataLoader::load_read_channels(const std::filesystem::path& data_path,

@@ -163,10 +163,10 @@ void set_dorado_basecaller_args(utils::arg_parse::ArgParser& parser, int& verbos
             .scan<'i', int64_t>()
             .help("Batchsize used to read SLOW5/BLOW");
 
-        parser.visible.add_argument("-l", "--read-ids")
-                .help("A file with a newline-delimited list of reads to basecall. If not provided, "
-                      "all reads will be basecalled.")
-                .default_value(std::string(""));
+        // parser.visible.add_argument("-l", "--read-ids")
+        //         .help("A file with a newline-delimited list of reads to basecall. If not provided, "
+        //               "all reads will be basecalled.")
+        //         .default_value(std::string(""));
         parser.visible.add_argument("-n", "--max-reads")
                 .help("Limit the number of reads to be basecalled.")
                 .default_value(0)
@@ -843,7 +843,7 @@ int basecaller(int argc, char* argv[]) {
               default_parameters.remora_batchsize, default_parameters.remora_threads,
               methylation_threshold, std::move(hts_file), parser.visible.get<bool>("--emit-moves"),
               parser.visible.get<int>("--max-reads"), parser.visible.get<int>("--min-qscore"),
-              parser.visible.get<std::string>("--read-ids"), parser.visible.get<int32_t>("--slow5_threads"), parser.visible.get<int64_t>("--slow5_batchsize"), recursive, *minimap_options,
+              "", parser.visible.get<int32_t>("--slow5_threads"), parser.visible.get<int64_t>("--slow5_batchsize"), recursive, *minimap_options,
               parser.hidden.get<bool>("--skip-model-compatibility-check"),
               parser.hidden.get<std::string>("--dump_stats_file"),
               parser.hidden.get<std::string>("--dump_stats_filter"), run_batchsize_benchmarks,
