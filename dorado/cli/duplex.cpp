@@ -476,7 +476,7 @@ int duplex(int argc, char* argv[]) {
                 return EXIT_FAILURE;
             }
         }
-        spdlog::debug("> Reads to process: {}", num_reads);
+        // spdlog::debug("> Reads to process: {}", num_reads);
 
         SamHdrPtr hdr(sam_hdr_init());
         cli::add_pg_hdr(hdr.get(), "duplex", args, device);

@@ -540,22 +540,26 @@ int DataLoader::get_num_reads(const std::filesystem::path& data_path,
                 HighFive::Group reads = file.getGroup("/");
                 num_reads += reads.getNumberObjects();
             } else if (ext == ".slow5" || ext == ".blow5") {
-                slow5_file_t *sp = slow5_open(entry.path().string().c_str(),"r");
-                if(sp==NULL){
-                    fprintf(stderr,"Error in opening file\n");
-                    exit(EXIT_FAILURE);
+                if(ignore_read_list.size()>0 or read_list){
+                    throw std::runtime_error("-l, --read-ids flags not supported with blow5 input");
                 }
-                size_t bytes;
-                char *mem;
-                while ((mem = (char *) slow5_get_next_mem(&bytes, sp))) {
-                    free(mem);
-                    num_reads++;
-                }
-                if (slow5_errno != SLOW5_ERR_EOF) {
-                    fprintf(stderr,"Error reading the file.%s","");
-                    exit(EXIT_FAILURE);
-                }
-                slow5_close(sp);
+                num_reads++;
+                // slow5_file_t *sp = slow5_open(entry.path().string().c_str(),"r");
+                // if(sp==NULL){
+                //     fprintf(stderr,"Error in opening file\n");
+                //     exit(EXIT_FAILURE);
+                // }
+                // size_t bytes;
+                // char *mem;
+                // while ((mem = (char *) slow5_get_next_mem(&bytes, sp))) {
+                //     free(mem);
+                //     num_reads++;
+                // }
+                // if (slow5_errno != SLOW5_ERR_EOF) {
+                //     fprintf(stderr,"Error reading the file.%s","");
+                //     exit(EXIT_FAILURE);
+                // }
+                // slow5_close(sp);
             }
         }
     };
