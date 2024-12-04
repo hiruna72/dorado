@@ -517,7 +517,7 @@ int DataLoader::get_num_reads(const std::filesystem::path& data_path,
         spdlog::debug("> args to get_num_reads: {}",recursive_file_loading);
     }
     
-    return 1;
+    return 0;
 
 }
 

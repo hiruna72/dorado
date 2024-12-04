@@ -126,7 +126,7 @@ void set_dorado_basecaller_args(utils::arg_parse::ArgParser& parser, int& verbos
     parser.visible.add_argument("model").help(
             "Model selection {fast,hac,sup}@v{version} for automatic model selection including "
             "modbases, or path to existing model directory.");
-    parser.visible.add_argument("data").help("The data directory or file (POD5/FAST5 format).");
+    parser.visible.add_argument("data").help("The data directory or file (POD5/FAST5/SLOW5/BLOW5 format).");
     {
         // Default "Optional arguments" group
         parser.visible.add_argument("-v", "--verbose")
@@ -161,7 +161,7 @@ void set_dorado_basecaller_args(utils::arg_parse::ArgParser& parser, int& verbos
         parser.visible.add_argument("--slow5_batchsize")
             .default_value(default_parameters.slow5_batchsize)
             .scan<'i', int64_t>()
-            .help("Batchsize used to read SLOW5/BLOW");
+            .help("Batchsize used to read SLOW5/BLOW5");
 
         // parser.visible.add_argument("-l", "--read-ids")
         //         .help("A file with a newline-delimited list of reads to basecall. If not provided, "
@@ -335,10 +335,10 @@ void setup(const std::vector<std::string>& args,
     auto read_list = utils::load_read_list(read_list_file_path);
     size_t num_reads = DataLoader::get_num_reads(
             data_path, read_list, {} /*reads_already_processed*/, recursive_file_loading);
-    if (num_reads == 0) {
-        spdlog::error("No POD5 or FAST5 reads found in path: " + data_path);
-        std::exit(EXIT_FAILURE);
-    }
+    // if (num_reads == 0) {
+    //     spdlog::error("No POD5 or FAST5 reads found in path: " + data_path);
+    //     std::exit(EXIT_FAILURE);
+    // }
     num_reads = max_reads == 0 ? num_reads : std::min(num_reads, max_reads);
 
     // Sampling rate is checked by ModelComplexSearch when a complex is given, only test for a path

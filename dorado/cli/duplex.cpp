@@ -293,7 +293,7 @@ int duplex(int argc, char* argv[]) {
             "Model selection {fast,hac,sup}@v{version} for automatic model selection including "
             "modbases, or path to existing model directory.");
     parser.visible.add_argument("reads").help(
-            "Reads in POD5 format or BAM/SAM format for basespace.");
+            "Reads in POD5/BLOW5 format or BAM/SAM format for basespace.");
 
     int verbosity = 0;
     parser.visible.add_argument("-v", "--verbose")
@@ -311,7 +311,7 @@ int duplex(int argc, char* argv[]) {
     {
         parser.visible.add_group("Input data arguments");
         parser.visible.add_argument("-r", "--recursive")
-                .help("Recursively scan through directories to load FAST5 and POD5 files.")
+                .help("Recursively scan through directories to load FAST5/POD5/BLOW5 files.")
                 .default_value(false)
                 .implicit_value(true);
         parser.visible.add_argument("-l", "--read-ids")
@@ -471,10 +471,10 @@ int duplex(int argc, char* argv[]) {
             num_reads = read_list_from_pairs.size();
         } else {
             num_reads = DataLoader::get_num_reads(reads, read_list, {}, recursive_file_loading);
-            if (num_reads == 0) {
-                spdlog::error("No POD5 or FAST5 reads found in path: " + reads);
-                return EXIT_FAILURE;
-            }
+            // if (num_reads == 0) {
+            //     spdlog::error("No POD5 or FAST5 reads found in path: " + reads);
+            //     return EXIT_FAILURE;
+            // }
         }
         // spdlog::debug("> Reads to process: {}", num_reads);
 
