@@ -15,6 +15,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include "slow5/slow5.h"
 
 struct Pod5FileReader;
 
@@ -96,7 +97,7 @@ private:
     void load_pod5_reads_from_file_by_read_ids(const std::string& path,
                                                const std::vector<ReadID>& read_ids);
     void load_slow5_reads_from_file(const std::string& path);
-    void load_slow5_reads_from_file_by_read_ids(const std::string& path, const std::vector<ReadID>& read_ids);
+    void load_slow5_reads_from_file_by_read_ids(slow5_file_t *sp, const std::vector<ReadID>& read_ids);
     void load_read_channels(const std::filesystem::path& data_path, bool recursive_file_loading);
 
     void initialise_read(ReadCommon& read) const;

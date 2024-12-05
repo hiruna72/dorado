@@ -412,7 +412,32 @@ void DataLoader::load_reads(const std::filesystem::path& path,
 
     auto iterate_directory = [&](const auto& iterator) {
         switch (traversal_order) {
-        case ReadOrder::BY_CHANNEL:
+        case ReadOrder::BY_CHANNEL:{
+            std::string slow5_file_path = "";
+            int slow5_file_count = 0;
+            slow5_file_t *sp = NULL;
+            for (const auto& entry : iterator) {
+                std::string ext = std::filesystem::path(entry).extension().string();
+                if (ext == ".slow5" || ext == ".blow5") {
+                    slow5_file_path = entry.path();
+                    slow5_file_count++;
+                }
+            }
+
+            if(slow5_file_count > 1){
+                throw std::runtime_error("Please provide a single BLOW5 file path for duplex calling. Multiple files are not supported");
+            } 
+            if(slow5_file_count == 1){
+                sp = slow5_open(slow5_file_path.c_str(), "r");
+                if (sp == NULL) {
+                    throw std::runtime_error("Error in opening SLOW5/BLOW5 file");
+                }
+                int ret = slow5_idx_load(sp);
+                if(ret<0){
+                    throw std::runtime_error("Error in loading index for SLOW5/BLOW5 file");
+                }
+            }
+
             // If traversal in channel order is required, the following algorithm
             // is used -
             // 1. iterate through all the read metadata to collect channel information
@@ -423,6 +448,7 @@ void DataLoader::load_reads(const std::filesystem::path& path,
             spdlog::info("> Processed read channel info");
             // 3. for each channel, iterate through all files and in each iteration
             // only load the reads that correspond to that channel.
+
             for (int channel = 0; channel <= m_max_channel; channel++) {
                 if (m_reads_by_channel.find(channel) != m_reads_by_channel.end()) {
                     // Sort the read ids within a channel by its mux
@@ -444,41 +470,48 @@ void DataLoader::load_reads(const std::filesystem::path& path,
                     }
                     spdlog::debug("Sorted channel {}", channel);
                 }
-                for (const auto& entry : iterator) {
-                    if (m_loaded_read_count == m_max_reads) {
-                        break;
+                if(slow5_file_count == 1){
+                    auto& channel_to_read_ids =
+                            m_file_channel_read_order_map.at(slow5_file_path);
+                    auto& read_ids = channel_to_read_ids[channel];
+                    if (!read_ids.empty()) {
+                        load_slow5_reads_from_file_by_read_ids(sp, read_ids);
                     }
-                    auto entry_path = std::filesystem::path(entry);
-                    std::string ext = entry_path.extension().string();
-                    std::transform(ext.begin(), ext.end(), ext.begin(),
-                                   [](unsigned char c) { return std::tolower(c); });
-                    if (ext == ".fast5") {
-                        throw std::runtime_error(
-                                "Traversing reads by channel is only available for POD5. "
-                                "Encountered FAST5 at " +
-                                entry_path.string());
-                    } else if (ext == ".pod5") {
-                        auto& channel_to_read_ids =
-                                m_file_channel_read_order_map.at(entry_path.string());
-                        auto& read_ids = channel_to_read_ids[channel];
-                        if (!read_ids.empty()) {
-                            load_pod5_reads_from_file_by_read_ids(entry_path.string(), read_ids);
+                }else{
+                    for (const auto& entry : iterator) {
+                        if (m_loaded_read_count == m_max_reads) {
+                            break;
                         }
-                    } else if (ext == ".slow5" || ext == ".blow5") {
-                        auto& channel_to_read_ids =
-                                m_file_channel_read_order_map.at(entry_path.string());
-                        auto& read_ids = channel_to_read_ids[channel];
-                        if (!read_ids.empty()) {
-                            load_slow5_reads_from_file_by_read_ids(entry_path.string(), read_ids);
+                        auto entry_path = std::filesystem::path(entry);
+                        std::string ext = entry_path.extension().string();
+                        std::transform(ext.begin(), ext.end(), ext.begin(),
+                                    [](unsigned char c) { return std::tolower(c); });
+                        if (ext == ".fast5") {
+                            throw std::runtime_error(
+                                    "Traversing reads by channel is only available for POD5. "
+                                    "Encountered FAST5 at " +
+                                    entry_path.string());
+                        } else if (ext == ".pod5") {
+                            auto& channel_to_read_ids =
+                                    m_file_channel_read_order_map.at(entry_path.string());
+                            auto& read_ids = channel_to_read_ids[channel];
+                            if (!read_ids.empty()) {
+                                load_pod5_reads_from_file_by_read_ids(entry_path.string(), read_ids);
+                            }
                         }
                     }
                 }
+                
                 // Erase sorted list as it's not needed anymore.
                 m_reads_by_channel.erase(channel);
             }
+            if(slow5_file_count == 1){
+                slow5_idx_unload(sp);
+                slow5_close(sp);
+            }
             break;
+        }
         case ReadOrder::UNRESTRICTED:
-
             for (const auto& entry : iterator) {
                 if (m_loaded_read_count == m_max_reads) {
                     break;
@@ -1628,19 +1661,10 @@ void DataLoader::load_slow5_reads_from_file(const std::string &path) {
     }
     slow5_close(sp);
 }
-void DataLoader::load_slow5_reads_from_file_by_read_ids(const std::string &path, const std::vector<ReadID>& read_ids) {
+void DataLoader::load_slow5_reads_from_file_by_read_ids(slow5_file_t *sp, const std::vector<ReadID>& read_ids) {
 
-    slow5_file_t *sp = slow5_open(path.c_str(), "r");
-    if (sp == NULL) {
-        fprintf(stderr, "Error in opening file\n");
-        exit(EXIT_FAILURE);
-    }
+    int ret = 0;
     slow5_rec_t **rec = NULL;
-    int ret = slow5_idx_load(sp);
-    if(ret<0){
-        fprintf(stderr,"Error in loading index\n");
-        exit(EXIT_FAILURE);
-    }
 
     size_t num_rid = read_ids.size();
     size_t read_count = 0;
@@ -1681,8 +1705,7 @@ void DataLoader::load_slow5_reads_from_file_by_read_ids(const std::string &path,
         }
     }
     free(rid);
-    slow5_idx_unload(sp);
-    slow5_close(sp);
+    
 }
 
 
