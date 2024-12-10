@@ -168,95 +168,96 @@ models::ChemistryKey get_chemistry_key(const RunInfoDictData_t* const run_info_d
     return key;
 }
 
-// void dump_to_stderr(const SimplexReadPtr& simplex_read_ptr) {
-//     if (!simplex_read_ptr) {
-//         std::cerr << "Error: SimplexRead pointer is null.\n";
-//         return;
-//     }
+/*
+void dump_to_stderr(const SimplexReadPtr& simplex_read_ptr) {
+    if (!simplex_read_ptr) {
+        std::cerr << "Error: SimplexRead pointer is null.\n";
+        return;
+    }
 
-//     const auto& rc = simplex_read_ptr->read_common;
+    const auto& rc = simplex_read_ptr->read_common;
 
-//     // Dump ReadCommon members
-//     std::cerr << "Read ID: " << rc.read_id << '\n'
-//               << "Sequence: " << rc.seq << '\n'
-//               << "Qstring: " << rc.qstring << '\n'
-//               << "Run ID: " << rc.run_id << '\n'
-//               << "Flow Cell Product Code: " << rc.flow_cell_product_code << '\n'
-//               << "Flowcell ID: " << rc.flowcell_id << '\n'
-//               << "Position ID: " << rc.position_id << '\n'
-//               << "Experiment ID: " << rc.experiment_id << '\n'
-//               << "Model Name: " << rc.model_name << '\n'
-//               << "Model Stride: " << rc.model_stride << '\n'
-//               << "Start Time (ms): " << rc.start_time_ms << '\n'
-//               << "Pre-trim Sequence Length: " << rc.pre_trim_seq_length << '\n'
-//               << "Adapter Trim Interval: (" << rc.adapter_trim_interval.first << ", " << rc.adapter_trim_interval.second << ") " << '\n'
-//               << "Barcode Trim Interval: (" << rc.barcode_trim_interval.first << ", " << rc.barcode_trim_interval.second << ") " << '\n'
-//               << "Read Tag: " << rc.read_tag << '\n'
-//               << "Mean Qscore Start Pos: " << rc.mean_qscore_start_pos << '\n'
-//               << "Barcode: " << rc.barcode << '\n'
-//               << "Sample Rate: " << rc.sample_rate << '\n'
-//               << "Shift: " << rc.shift << '\n'
-//               << "Scale: " << rc.scale << '\n'
-//               << "Scaling Method: " << rc.scaling_method << '\n'
-//               << "Parent Read ID: " << rc.parent_read_id << '\n'
-//               << "Num Trimmed Samples: " << rc.num_trimmed_samples << '\n'
-//               << "Is Duplex: " << rc.is_duplex << '\n'
-//               << "Is RNA Model: " << rc.is_rna_model << '\n'
-//               << "RNA Poly Tail Length: " << rc.rna_poly_tail_length << '\n'
-//               << "RNA Adapter End Signal Pos: " << rc.rna_adapter_end_signal_pos << '\n'
-//               << "Subread ID: " << rc.subread_id << '\n'
-//               << "Split Count: " << rc.split_count << '\n'
-//               << "Split Point: " << rc.split_point << '\n'
-//               << "Model Q Bias: " << rc.model_q_bias << '\n'
-//               << "Model Q Scale: " << rc.model_q_scale << std::endl;
+    // Dump ReadCommon members
+    std::cerr << "Read ID: " << rc.read_id << '\n'
+              << "Sequence: " << rc.seq << '\n'
+              << "Qstring: " << rc.qstring << '\n'
+              << "Run ID: " << rc.run_id << '\n'
+              << "Flow Cell Product Code: " << rc.flow_cell_product_code << '\n'
+              << "Flowcell ID: " << rc.flowcell_id << '\n'
+              << "Position ID: " << rc.position_id << '\n'
+              << "Experiment ID: " << rc.experiment_id << '\n'
+              << "Model Name: " << rc.model_name << '\n'
+              << "Model Stride: " << rc.model_stride << '\n'
+              << "Start Time (ms): " << rc.start_time_ms << '\n'
+              << "Pre-trim Sequence Length: " << rc.pre_trim_seq_length << '\n'
+              << "Adapter Trim Interval: (" << rc.adapter_trim_interval.first << ", " << rc.adapter_trim_interval.second << ") " << '\n'
+              << "Barcode Trim Interval: (" << rc.barcode_trim_interval.first << ", " << rc.barcode_trim_interval.second << ") " << '\n'
+              << "Read Tag: " << rc.read_tag << '\n'
+              << "Mean Qscore Start Pos: " << rc.mean_qscore_start_pos << '\n'
+              << "Barcode: " << rc.barcode << '\n'
+              << "Sample Rate: " << rc.sample_rate << '\n'
+              << "Shift: " << rc.shift << '\n'
+              << "Scale: " << rc.scale << '\n'
+              << "Scaling Method: " << rc.scaling_method << '\n'
+              << "Parent Read ID: " << rc.parent_read_id << '\n'
+              << "Num Trimmed Samples: " << rc.num_trimmed_samples << '\n'
+              << "Is Duplex: " << rc.is_duplex << '\n'
+              << "Is RNA Model: " << rc.is_rna_model << '\n'
+              << "RNA Poly Tail Length: " << rc.rna_poly_tail_length << '\n'
+              << "RNA Adapter End Signal Pos: " << rc.rna_adapter_end_signal_pos << '\n'
+              << "Subread ID: " << rc.subread_id << '\n'
+              << "Split Count: " << rc.split_count << '\n'
+              << "Split Point: " << rc.split_point << '\n'
+              << "Model Q Bias: " << rc.model_q_bias << '\n'
+              << "Model Q Scale: " << rc.model_q_scale << std::endl;
 
 
-//     // Dump moves, base_mod_probs, and alignment results sizes
-//     std::cerr << "Moves Size: " << rc.moves.size() << '\n'
-//               << "Base Mod Probs Size: " << rc.base_mod_probs.size() << '\n'
-//               << "Alignment Results Size: " << rc.alignment_results.size() << std::endl;
+    // Dump moves, base_mod_probs, and alignment results sizes
+    std::cerr << "Moves Size: " << rc.moves.size() << '\n'
+              << "Base Mod Probs Size: " << rc.base_mod_probs.size() << '\n'
+              << "Alignment Results Size: " << rc.alignment_results.size() << std::endl;
 
-//     // Dump SimplexRead members
-//     std::cerr << "Digitisation: " << simplex_read_ptr->digitisation << '\n'
-//               << "Range: " << simplex_read_ptr->range << '\n'
-//               << "Offset: " << simplex_read_ptr->offset << '\n'
-//               << "Scaling: " << simplex_read_ptr->scaling << '\n'
-//               << "Start Sample: " << simplex_read_ptr->start_sample << '\n'
-//               << "End Sample: " << simplex_read_ptr->end_sample << '\n'
-//               << "Run Acquisition Start Time (ms): " << simplex_read_ptr->run_acquisition_start_time_ms << '\n'
-//               << "Num Duplex Candidate Pairs: " << simplex_read_ptr->num_duplex_candidate_pairs.load() << '\n'
-//               << "Is Duplex Parent: " << simplex_read_ptr->is_duplex_parent.load() << '\n'
-//               << "Previous Read: " << simplex_read_ptr->prev_read << '\n'
-//               << "Next Read: " << simplex_read_ptr->next_read << std::endl;
+    // Dump SimplexRead members
+    std::cerr << "Digitisation: " << simplex_read_ptr->digitisation << '\n'
+              << "Range: " << simplex_read_ptr->range << '\n'
+              << "Offset: " << simplex_read_ptr->offset << '\n'
+              << "Scaling: " << simplex_read_ptr->scaling << '\n'
+              << "Start Sample: " << simplex_read_ptr->start_sample << '\n'
+              << "End Sample: " << simplex_read_ptr->end_sample << '\n'
+              << "Run Acquisition Start Time (ms): " << simplex_read_ptr->run_acquisition_start_time_ms << '\n'
+              << "Num Duplex Candidate Pairs: " << simplex_read_ptr->num_duplex_candidate_pairs.load() << '\n'
+              << "Is Duplex Parent: " << simplex_read_ptr->is_duplex_parent.load() << '\n'
+              << "Previous Read: " << simplex_read_ptr->prev_read << '\n'
+              << "Next Read: " << simplex_read_ptr->next_read << std::endl;
     
-//         // Dump Attributes members
-//     const auto& attr = rc.attributes;
-//     std::cerr << "Mux: " << attr.mux << '\n'
-//               << "Read Number: " << attr.read_number << '\n'
-//               << "Channel Number: " << attr.channel_number << '\n'
-//               << "Start Time: " << attr.start_time << '\n'
-//               << "Fast5 Filename: " << attr.fast5_filename << '\n'
-//               << "Num Samples: " << attr.num_samples << '\n'
-//               << "Is End Reason Mux Change: " << (attr.is_end_reason_mux_change ? "true" : "false") << std::endl;
+        // Dump Attributes members
+    const auto& attr = rc.attributes;
+    std::cerr << "Mux: " << attr.mux << '\n'
+              << "Read Number: " << attr.read_number << '\n'
+              << "Channel Number: " << attr.channel_number << '\n'
+              << "Start Time: " << attr.start_time << '\n'
+              << "Fast5 Filename: " << attr.fast5_filename << '\n'
+              << "Num Samples: " << attr.num_samples << '\n'
+              << "Is End Reason Mux Change: " << (attr.is_end_reason_mux_change ? "true" : "false") << std::endl;
 
     
-//     // Print raw_data tensor dimensions
-//     if (rc.raw_data.defined()) {  // Check if the tensor is initialized
-//         std::cerr << "Raw Data Dimensions: ";
-//         for (const auto& dim : rc.raw_data.sizes()) {
-//             std::cerr << dim << " ";
-//         }
-//         std::cerr << '\n';
-//     } else {
-//         std::cerr << "Raw Data: Tensor is undefined.\n";
-//     }
+    // Print raw_data tensor dimensions
+    if (rc.raw_data.defined()) {  // Check if the tensor is initialized
+        std::cerr << "Raw Data Dimensions: ";
+        for (const auto& dim : rc.raw_data.sizes()) {
+            std::cerr << dim << " ";
+        }
+        std::cerr << '\n';
+    } else {
+        std::cerr << "Raw Data: Tensor is undefined.\n";
+    }
 
-//     // Print Chemistry and RapidChemistry enum as integers
-//     std::cerr << "Chemistry Type: " << static_cast<int>(rc.chemistry) << '\n'
-//               << "Rapid Chemistry Type: " << static_cast<int>(rc.rapid_chemistry) << std::endl;
+    // Print Chemistry and RapidChemistry enum as integers
+    std::cerr << "Chemistry Type: " << static_cast<int>(rc.chemistry) << '\n'
+              << "Rapid Chemistry Type: " << static_cast<int>(rc.rapid_chemistry) << std::endl;
 
-// }
-
+}
+*/
 
 
 SimplexReadPtr process_pod5_thread_fn(
@@ -1488,34 +1489,10 @@ SimplexReadPtr create_read(slow5_file_t *sp, slow5_rec_t * rec, std::string m_de
         }
     }
     exp_start_time_ms = std::string(exp_start_time_ms_c);
-
     auto run_acquisition_start_time_ms = utils::get_unix_time_from_string_timestamp(exp_start_time_ms);
+    // std::cerr << "run_acquisition_start_time_ms: " << run_acquisition_start_time_ms << std::endl;
     auto start_time_ms = run_acquisition_start_time_ms + ((start_time * 1000) /(uint64_t)rec->sampling_rate);
     auto start_time_str = utils::get_string_timestamp_from_unix_time(start_time_ms);
-
-    //    auto options = torch::TensorOptions().dtype(torch::kFloat32);
-    // auto options = torch::TensorOptions().dtype(torch::kInt16);
-    // new_read->raw_data = torch::from_blob(tmp.data(), tmp.size(), options).clone().to(m_device_);
-    // new_read->sample_rate = rec->sampling_rate;
-    // new_read->run_acquisition_start_time_ms = run_acquisition_start_time_ms;
-    // new_read->start_time_ms = start_time_ms;
-    // new_read->scaling = rec->range / rec->digitisation;
-    // new_read->offset = rec->offset;
-    // new_read->read_id = std::string(rec->read_id);
-    // new_read->num_trimmed_samples = 0;
-    // new_read->attributes.read_number = read_number;
-    // new_read->attributes.fast5_filename = std::string(sp->meta.pathname);
-    // new_read->attributes.mux = mux;
-    // new_read->attributes.num_samples = rec->len_raw_signal;
-    // new_read->attributes.channel_number = channel_number;
-    // new_read->attributes.start_time = start_time_str;
-    // new_read->run_id = run_id;
-    // new_read->start_sample = start_time;
-    // new_read->end_sample = start_time + rec->len_raw_signal;
-    // new_read->flowcell_id = flowcell_id;
-    // new_read->is_duplex = false;
-    // new_read->digitisation = rec->digitisation;
-    // new_read->range = rec->range;
 
     auto new_read = std::make_unique<SimplexRead>();
 
@@ -1554,6 +1531,22 @@ SimplexReadPtr create_read(slow5_file_t *sp, slow5_rec_t * rec, std::string m_de
     const auto condition_info = models::ConditionInfo(get_chemistry_key(&run_info_data));
     new_read->read_common.rapid_chemistry = condition_info.rapid_chemistry();
     new_read->read_common.chemistry = condition_info.chemistry();
+
+    uint8_t end_reason = slow5_aux_get_enum(rec,"end_reason",&ret);
+    if(ret!=0){
+        fprintf(stderr,"Error in getting auxiliary attribute from the file. Error code %d\n",ret);
+        exit(EXIT_FAILURE);
+    }
+    if(end_reason != SLOW5_ENUM_NULL){
+        pod5_end_reason_t end_reason_value = static_cast<pod5_end_reason_t>(end_reason);
+        if (end_reason_value == POD5_END_REASON_UNBLOCK_MUX_CHANGE ||
+               end_reason_value == POD5_END_REASON_MUX_CHANGE) {
+            new_read->read_common.attributes.is_end_reason_mux_change = true;
+        }
+    } else{
+        spdlog::error("Failed to get read end_reason for read {}", new_read->read_common.read_id);
+    }
+
 
     // Determine the time sorted predecessor of the read
     // if that information is available (primarily used for offline
