@@ -1537,10 +1537,37 @@ SimplexReadPtr create_read(slow5_file_t *sp, slow5_rec_t * rec, std::string m_de
         fprintf(stderr,"Error in getting auxiliary attribute from the file. Error code %d\n",ret);
         exit(EXIT_FAILURE);
     }
+
+    uint8_t num_label = 0;
+    char **labels = slow5_get_aux_enum_labels(sp->header, "end_reason", &num_label);
+    if(labels==NULL){
+        fprintf(stderr,"Error in getting list of enum labels\n");
+        exit(EXIT_FAILURE);
+    }
+
+    // for (int i = 0; i < num_label; ++i) {
+    //     if (labels[i] != nullptr) { // Check for null pointers
+    //         std::cerr << "Label " << i << ": " << labels[i] << std::endl;
+    //     } else {
+    //         std::cerr << "Label " << i << ": (null)" << std::endl;
+    //     }
+    // }
+    
+    // if(end_reason != SLOW5_ENUM_NULL){
+    //     printf("end_reason = %s\n", labels[end_reason]);
+    // } else{
+    //     printf("end_reason is missing for the record\n");
+    // }
+
+
+
     if(end_reason != SLOW5_ENUM_NULL){
-        pod5_end_reason_t end_reason_value = static_cast<pod5_end_reason_t>(end_reason);
-        if (end_reason_value == POD5_END_REASON_UNBLOCK_MUX_CHANGE ||
-               end_reason_value == POD5_END_REASON_MUX_CHANGE) {
+        // pod5_end_reason_t end_reason_value = static_cast<pod5_end_reason_t>(end_reason);
+        // if (end_reason_value == POD5_END_REASON_UNBLOCK_MUX_CHANGE ||
+        //        end_reason_value == POD5_END_REASON_MUX_CHANGE) {
+        //     new_read->read_common.attributes.is_end_reason_mux_change = true;
+        // }
+        if(strcmp(labels[end_reason],"unblock_mux_change")==0 || strcmp(labels[end_reason],"mux_change")==0){
             new_read->read_common.attributes.is_end_reason_mux_change = true;
         }
     } else{
