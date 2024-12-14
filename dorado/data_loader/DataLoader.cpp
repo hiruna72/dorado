@@ -772,8 +772,7 @@ std::unordered_map<std::string, ReadGroup> DataLoader::load_read_groups(
             } else if (ext == ".slow5" || ext == ".blow5") {
                 slow5_file_t *sp = slow5_open(entry.path().string().c_str(),"r");
                 if(sp==NULL){
-                    fprintf(stderr,"Error in opening file\n");
-                    exit(EXIT_FAILURE);
+                    throw std::runtime_error("Error in opening file");
                 }
                 int64_t read_group_count = sp->header->num_read_groups;
                 for(int64_t j=0; j<read_group_count; j++){
@@ -781,32 +780,32 @@ std::unordered_map<std::string, ReadGroup> DataLoader::load_read_groups(
                     std::string run_id = "";
                     if(!run_id_c){
                         fprintf(stderr,"No run_id found in %s. (%s)\n", entry.path().string().c_str(), "DataLoader::load_read_groups");
-                        exit(EXIT_FAILURE);
-                    } else{
-                        run_id = std::string(run_id_c);
+                        throw std::runtime_error("No run_id found");
                     }
+                    run_id = std::string(run_id_c);
+
                     char* flow_cell_id_c = slow5_hdr_get("flow_cell_id", j, sp->header);
                     std::string flow_cell_id = "";
                     if(!flow_cell_id_c){
                         fprintf(stderr,"No flowcell_id found in %s. (%s)\n", entry.path().string().c_str(), "DataLoader::load_read_groups");
-                        exit(EXIT_FAILURE);
-                    } else{
-                        flow_cell_id = std::string(flow_cell_id_c);
+                        throw std::runtime_error("No flowcell_id found");
                     }
-                    char* device_id_c = slow5_hdr_get("device_id", j, sp->header);
+                    flow_cell_id = std::string(flow_cell_id_c);
+                    
+                    char* device_id_c = slow5_hdr_get("host_product_serial_number", j, sp->header); //pod5 has started to use confusing variable name. device_id and sequencer_position refer to the same in the blow5 and pod5 file specifications.
                     std::string device_id = "";
                     if(!device_id_c){
-                        fprintf(stderr,"No device_id found in %s. (%s)\n", entry.path().string().c_str(), "DataLoader::load_read_groups");
-                        exit(EXIT_FAILURE);
-                    } else{
-                        device_id = std::string(device_id_c);
+                            device_id_c = slow5_hdr_get("system_name", j, sp->header);
+                            if(!device_id_c) {
+                                throw std::runtime_error("Niether host_product_serial_number nor system_name found");
+                            }
                     }
+                    device_id = std::string(device_id_c);
+
                     char* experiment_id_c = slow5_hdr_get("experiment_name", j, sp->header);
                     std::string experiment_id = "";
                     if(experiment_id_c){
                         experiment_id = std::string(experiment_id_c);
-                        // fprintf(stderr,"No experiment_name found in %s. (%s)\n", entry.path().string().c_str(), "DataLoader::load_read_groups");
-                        // exit(EXIT_FAILURE);
                     }
 
                     char* exp_start_time_ms_c = slow5_hdr_get("acquisition_start_time", j, sp->header);
@@ -814,27 +813,25 @@ std::unordered_map<std::string, ReadGroup> DataLoader::load_read_groups(
                     if(!exp_start_time_ms_c){
                         exp_start_time_ms_c = slow5_hdr_get("exp_start_time", j, sp->header);
                         if(!exp_start_time_ms_c) {
-                            fprintf(stderr, "Neither acquisition_start_time nor exp_start_time found in %s.", entry.path().string().c_str());
-                            exit(EXIT_FAILURE);
+                            throw std::runtime_error("Neither acquisition_start_time nor exp_start_time found");
                         }
-                    } else{
-                        exp_start_time_ms = std::string(exp_start_time_ms_c);
                     }
+                    exp_start_time_ms = std::string(exp_start_time_ms_c);
+                    // std::cerr << "exp_start_time_ms: " << exp_start_time_ms << std::endl;
+                    
                     char* sample_id_c = slow5_hdr_get("sample_id", j, sp->header);
                     std::string sample_id = "";
                     if(!sample_id_c){
                         fprintf(stderr,"No sample_id found in %s. (%s)\n", entry.path().string().c_str(), "DataLoader::load_read_groups");
-                        exit(EXIT_FAILURE);
-                    } else{
-                        sample_id = std::string(sample_id_c);
+                        throw std::runtime_error("No sample_id found");
                     }
+                    sample_id = std::string(sample_id_c);
+                    
 
                     char* position_id_c = slow5_hdr_get("sequencer_position", j, sp->header);
                     std::string position_id = "";
                     if(position_id_c){
                         position_id = std::string(position_id_c);
-                        // fprintf(stderr,"No sequencer_position found in %s. (%s)\n", entry.path().string().c_str(), "DataLoader::load_read_groups");
-                        // exit(EXIT_FAILURE);
                     }
 
                     std::string id = std::string(run_id).append("_").append(model_name);
@@ -844,7 +841,7 @@ std::unordered_map<std::string, ReadGroup> DataLoader::load_read_groups(
                             modbase_model_names,
                             std::move(flow_cell_id),
                             std::move(device_id),
-                            std::move(exp_start_time_ms),
+                            utils::get_string_timestamp_from_unix_time(utils::get_unix_time_from_string_timestamp(exp_start_time_ms)),
                             std::move(sample_id),
                             std::move(position_id),
                             std::move(experiment_id),
